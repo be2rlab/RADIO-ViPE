@@ -136,6 +136,7 @@ class DenseDepthFlowTerm(SolverTerm):
         residual_scale: float = 1.0,
         use_photometric_residual: bool = False,
         debug_options: dict[str, Any] | None = None,
+        use_semantic_kernel: bool= False
     ) -> None:
         super().__init__()
 
@@ -147,7 +148,7 @@ class DenseDepthFlowTerm(SolverTerm):
         assert dense_disp_i_inds.shape == (self.n_terms,)
         assert dense_disp_j_inds.shape == (self.n_terms,)
 
-
+        self.use_semantic_kernel = use_semantic_kernel
         self.pose_i_inds = pose_i_inds
         self.pose_j_inds = pose_j_inds
         self.rig_i_inds = rig_i_inds
@@ -303,7 +304,7 @@ class DenseDepthFlowTerm(SolverTerm):
                     j_inds=torch.cat([self.rig_i_inds, self.rig_j_inds]),
                     data=torch.cat([Jri, Jrj], dim=0),
                 )
-        if self.embeddings is not None:
+        if self.embeddings is not None and self.use_semantic_kernel:
             emedding_redisdual, embedding_residual_weights = self.compute_embedding_residuals(coords,valid,'cuda:0')
             emedding_redisdual = 1- emedding_redisdual
             self.calculate_alpha(emedding_redisdual,embedding_residual_weights)

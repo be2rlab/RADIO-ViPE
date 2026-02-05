@@ -63,7 +63,6 @@ class AdaptiveBarronRobustKernel(RobustKernel):
         """
         if alpha is None:
             alpha = torch.tensor(self.alpha, device=x.device, dtype=x.dtype)  # scalar case
-            print("We are at the none case")
         
         # Ensure alpha has same shape as x for broadcasting
         if alpha.dim() == 0:

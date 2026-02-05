@@ -226,7 +226,7 @@ class SLAMSystem:
             if self.embedder is not None and kf_idx not in self.embedded_keyframes:
                 # print(f"[EMBEDDER] Running on keyframe_idx={kf_idx}, frame_idx={frame_idx}")
                 frame_data.features, frame_data.features_patch_size = self.embedder.process_frame(frame_data)
-                self._maybe_save_pca_state()
+                # self._maybe_save_pca_state()
                 self.embedded_keyframes.add(kf_idx)
 
             if frame_data.features is not None:

@@ -170,10 +170,15 @@ JIAHUI.md
 .vscode/*
 **.engine
 **.onnx
-**.pt
 **.pth
 .models_cache/*
 **.mp4
 weights/*
 **.txt
 tum_results
+**.pkl
+**.zip
+**.npz
+**.packaging
+**.png
+aria_results/

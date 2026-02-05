@@ -478,8 +478,9 @@ class GraphBuffer:
         embedding_term_activation_iter = n_iters
         embedding_term = None
         embedding_weight = float(getattr(self.ba_config, "embedding_weight", 0.0))
+        use_semantic_kernel = bool(getattr(self.ba_config,"use_semantic_kernel",False))
         embedding_weight_map: torch.Tensor | None = None
-        if self.embeddings is not None:
+        if self.embeddings is not None or use_semantic_kernel:
             embedding_valid = self.flattened_embedding_valid_mask if self.embedding_valid_mask is not None else None
             dense_h, dense_w = self.height // 8, self.width // 8
             per_pixel_weight = rearrange(
@@ -509,7 +510,8 @@ class GraphBuffer:
                 intrinsics_factor=8.0,
                 rig=None,
                 image_size=(self.height // 8, self.width // 8),
-                camera_type=self.camera_type
+                camera_type=self.camera_type,
+                use_semantic_kernel = use_semantic_kernel,
             ),AdaptiveBarronRobustKernel()
         )
 

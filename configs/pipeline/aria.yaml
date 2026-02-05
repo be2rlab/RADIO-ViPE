@@ -1,0 +1,65 @@
+defaults:
+  - /slam: aria
+
+instance: vipe.pipeline.default.DefaultAnnotationPipeline
+
+# Init configs
+init:
+  camera_type: "pinhole"
+  intrinsics: "geocalib"
+  instance:
+    kf_gap_sec: 2.0
+    phrases: 
+    - hand
+      # - person
+      # - spoon
+      # - tablespoon
+      # - spatula
+      # - pan
+      # - bowl
+      # - plate
+      # - baking pan
+      # - cup
+      # - fork
+      # - kitchen utensil
+      # - bottle
+      # - chair
+      # - can
+      # - frisbee
+      # - jar
+      # - food object
+      # - tray
+      # - box
+      # - toy
+      # - step stool
+      # - wall artwork
+      # - desk clock
+      # - vase
+      # - coaster
+      # - cutting board
+      # - play set
+    add_sky: false
+
+slam:
+  keyframe_depth: unidepth-l
+  optimize_intrinsics: ${neq:${..init.intrinsics},"gt"}
+  visualize: true
+
+# Post-processing configs
+post:
+  depth_align_model: "adaptive_unidepth-l"
+
+# Output configs
+output:
+  # Path to save results
+  path: vipe_results/
+  skip_exists: false
+
+  # Save artifacts and a info file
+  save_artifacts: false
+  
+  save_slam_map: true
+  # Visualization videos to BASE_PATH/vipe/xxx.mp4
+  save_viz: false
+  viz_downsample: 2
+  viz_attributes: [['rgb', 'instance'], ['depth', 'pcd']]

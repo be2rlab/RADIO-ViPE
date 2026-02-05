@@ -108,6 +108,28 @@ class PCAProjector:
         self._basis = PCABasis(mean=mean, components=components)
         return self._basis
 
+    def load_basis(self, path: Path) -> PCABasis:
+        """
+        Load PCA basis from a .pt file and initialize PCABasis.
+        """
+
+        if not path.exists():
+            raise FileNotFoundError(f"PCA basis file not found: {path}")
+
+        data = torch.load(path, map_location="cpu")
+
+        if "mean" not in data or "components" not in data:
+            raise KeyError(
+                f"PCA basis file must contain 'mean' and 'components' keys, "
+                f"found keys: {list(data.keys())}"
+            )
+
+        mean = data["mean"]
+        components = data["components"]
+
+        self._basis = PCABasis(mean=mean, components=components.T)
+        return self._basis
+
     def is_fit(self) -> bool:
         return self._basis is not None
 
@@ -173,6 +195,7 @@ class EmbeddingsPipeline:
         pca_dim: int | None = 32,
         pca_max_samples: int = 200_000,
         pca_seed: int = 0,
+        device: str = 'cuda',
         segment_with_yoloe: bool = False,
         yolo_model_path: str | None = None,
         yolo_conf_threshold: float = 0.25,
@@ -185,9 +208,10 @@ class EmbeddingsPipeline:
         self.family = DinoBackboneFamily.from_value(model_family)
         self.model_variant = self._resolve_model_variant(model_variant)
         self.weights_dir = self._resolve_weights_dir(weights_dir)
-        self.engine = self._build_engine()
+        self.engine = self._build_engine(device)
         self._norm_mean = torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32).view(3, 1, 1)
         self._norm_std = torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32).view(3, 1, 1)
+        self.device = device
 
         self.projector: PCAProjector | None = None
         if pca_dim is not None:
@@ -234,17 +258,19 @@ class EmbeddingsPipeline:
         default_dir = DEFAULT_DINOV3_WEIGHTS if self.family is DinoBackboneFamily.DINOV3 else DEFAULT_DINOV2_WEIGHTS
         return str(default_dir)
 
-    def _build_engine(self) -> DINOv2EmbeddingEngine | DINOv3EmbeddingEngine:
+    def _build_engine(self,device) -> DINOv2EmbeddingEngine | DINOv3EmbeddingEngine:
         if self.family is DinoBackboneFamily.DINOV3:
             return DINOv3EmbeddingEngine(
                 model=self.model_variant,
                 weights_dir=self.weights_dir,
                 pyramid_scales=[2.0, 1.0, 0.75],
+                device = device,
             )
         return DINOv2EmbeddingEngine(
             model=self.model_variant,
             weights_dir=self.weights_dir,
             pyramid_scales=[2.0, 1.0, 0.75],
+            device = device,
         )
 
     def _init_yolo_detector(self, model_path: str | None) -> None:
@@ -388,7 +414,7 @@ class EmbeddingsPipeline:
 
         if self.projector is not None:
             if not self.projector.is_fit():
-                self.projector.fit(feats)
+                self.projector.load_basis(Path('/home/user/km-vipe/pca_basis.pt'))
             codes = self.projector.encode(feats)
             del feats
         # mask_np, mask_info = self._segment_with_yoloe(frame_data)
@@ -406,3 +432,11 @@ class EmbeddingsPipeline:
             )
 
         return codes, self.engine.patch_size
+    
+
+    def process_image(self, image_tensor) -> tuple[torch.Tensor, int]:
+        """Process a single video frame to extract embeddings."""
+        orig_device = image_tensor.device
+        normalized = image_tensor
+        pyr_feats = self.engine.embed_frame_multiscale(normalized,[1.0])
+        return pyr_feats

@@ -27,7 +27,7 @@ class FrameDirStream(VideoStream):
     This does not support nested iterations.
     """
 
-    def __init__(self, path: Path, seek_range: range | None = None, name: str | None = None) -> None:
+    def __init__(self, path: Path, seek_range: range | None = None, name: str | None = None, dataset_name: None | str = None) -> None:
         super().__init__()
         if seek_range is None:
             seek_range = range(-1)
@@ -36,7 +36,10 @@ class FrameDirStream(VideoStream):
         self._name = name if name is not None else path.name
 
         # Find all image files in the directory
-        image_extensions = ['.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif']
+        if dataset_name == 'aria':
+            image_extensions = ['.jpg']
+        else:
+            image_extensions = ['.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif']
         self.frame_files = []
         for ext in image_extensions:
             self.frame_files.extend(sorted(path.glob(f'*{ext}')))
@@ -107,7 +110,7 @@ class FrameDirStream(VideoStream):
 
 
 class FrameDirStreamList(StreamList):
-    def __init__(self, base_path: str, frame_start: int, frame_end: int, frame_skip: int, cached: bool = False, scene_name: str = None) -> None:
+    def __init__(self, base_path: str, frame_start: int, frame_end: int, frame_skip: int, cached: bool = False, scene_name: str = None,dataset_name: None| str=None) -> None:
         super().__init__()
         base_path_obj = Path(base_path)
         
@@ -127,12 +130,13 @@ class FrameDirStreamList(StreamList):
         self.frame_range = range(frame_start, frame_end, frame_skip)
         self.cached = cached
         self.scene_name = scene_name
+        self.dataset_name = dataset_name
 
     def __len__(self) -> int:
         return len(self.frame_directories)
 
     def __getitem__(self, index: int) -> VideoStream:
-        stream: VideoStream = FrameDirStream(self.frame_directories[index], seek_range=self.frame_range, name=self.scene_name)
+        stream: VideoStream = FrameDirStream(self.frame_directories[index], seek_range=self.frame_range, name=self.scene_name,dataset_name = self.dataset_name)
         if self.cached:
             stream = ProcessedVideoStream(stream, []).cache(desc="Loading frames", online=False)
         return stream
