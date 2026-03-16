@@ -33,6 +33,11 @@ DEFAULT_DINOV2_WEIGHTS = _REPO_ROOT / "weights" / "dinov2"
 DEFAULT_YOLOE_WEIGHTS = _REPO_ROOT / "yoloe-11l-seg-pf.pt"
 logger = logging.getLogger(__name__)
 
+class RadioVariant(str, Enum):
+    RADIO_V2 = "radio_v2.5-h"
+    RADIO_V3B = "c-radio_v3-b"
+    RADIO_V4H = "c-radio_v4-h"
+
 
 class BackboneFamily(str, Enum):
     """Unified selector for supported backbones."""
@@ -319,9 +324,9 @@ class EmbeddingsPipeline:
     def __init__(
         self,
         model_family: BackboneFamily | str = BackboneFamily.DINOV3,
-        model_variant: str | DinoV3Variant | DinoV2Variant | None = None,
+        model_variant: str | DinoV3Variant | DinoV2Variant | RadioVariant |None = None,
         weights_dir: str | None = None,
-        pca_dim: int | None = None,
+        pca_dim: int | None = 256,
         pca_max_samples: int = 200_000,
         pca_seed: int = 0,
         device: str = "cuda",
@@ -334,15 +339,14 @@ class EmbeddingsPipeline:
         mask_visualization_entity: str = "yoloe",
         visualize_masks: bool = True,
         # ── RADSeg-specific parameters ──────────────────────────────
-        radseg_model_version: str = "c-radio_v3-b",
         radseg_lang_model: str = "siglip2",
         radseg_compile: bool = False,
         radseg_amp: bool = False,
         radseg_scra_scaling: float = 10.0,
         radseg_scga_scaling: float = 10.0,
-        radseg_slide_crop: int = 336,
-        radseg_slide_stride: int = 224,
-        radseg_lang_align: bool = True,
+        radseg_slide_crop: int = 224,
+        radseg_slide_stride: int = 160,
+        radseg_lang_align: bool = False,
         load_basis_flag: bool = False,
         pyramid_scales: Optional[List[float]] = None,
         enable_rerun: bool = True,
@@ -351,6 +355,7 @@ class EmbeddingsPipeline:
         self.family = BackboneFamily.from_value(model_family)
         self.device = device
         self.enable_rerun = enable_rerun
+        self.model_variant = model_variant
         # ── Build backbone ──────────────────────────────────────────
         if self.family is BackboneFamily.RADSEG:
             print(f"scra_scaling: {radseg_scra_scaling}")
@@ -358,9 +363,13 @@ class EmbeddingsPipeline:
             print(f"slide_crop: {radseg_slide_crop}")
             print(f"slide_stride: {radseg_slide_stride}")
             self._radseg_lang_align = radseg_lang_align
+            if self.model_variant == "c-radio_v4-h":
+                self.sam3 = True
+            else:
+                self.sam3 = False
             self.engine = self._build_radseg_encoder(
                 device=device,
-                model_version=radseg_model_version,
+                model_version=model_variant,
                 lang_model=radseg_lang_model,
                 compile=radseg_compile,
                 amp=radseg_amp,
@@ -368,12 +377,13 @@ class EmbeddingsPipeline:
                 scga_scaling=radseg_scga_scaling,
                 slide_crop=radseg_slide_crop,
                 slide_stride=radseg_slide_stride,
+                sam3 = self.sam3 
             )
             # engine/variant/weights are not used for RADSeg but we keep
             # them around so other code that inspects the pipeline doesn't break.
             self.pyramid_scales = pyramid_scales or [1.0, 0.75, 0.5]
             self.upsampler = PyramidUpsampler(scales=self.pyramid_scales, device=self.device)
-            self.model_variant = radseg_model_version
+            self.model_variant = model_variant
             self.weights_dir = None
         else:
             self._radseg_lang_align = False
@@ -421,6 +431,7 @@ class EmbeddingsPipeline:
         scga_scaling: float,
         slide_crop: int,
         slide_stride: int,
+        sam3: bool = False,
     ):
         return RADSegEncoder(
             device=device,
@@ -434,6 +445,7 @@ class EmbeddingsPipeline:
             scga_scaling=scga_scaling,
             slide_crop=slide_crop,
             slide_stride=slide_stride,
+            sam3= sam3,
         )
 
     # ── DINO helpers (unchanged) ────────────────────────────────────

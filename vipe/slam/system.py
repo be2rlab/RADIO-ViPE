@@ -153,10 +153,16 @@ class SLAMSystem:
         weights_dir = "/home/user/km-vipe/weights/dinov2"
         self.pca_state_path = Path(f"/home/user/km-vipe/vipe_results/vipe/{self.config.sequence_name}_pca_basis.pt")
         self._pca_state_saved = False
+        print(f"model_family: {self.config.model_family}, model_variant: {self.config.model_variant}")
         self.embedder = EmbeddingsPipeline(
-            model_family=self.config.model_family,
-            model_variant=self.config.model_variant,
-            weights_dir=weights_dir,
+            model_family = self.config.model_family,
+            model_variant = self.config.model_variant,
+            weights_dir = weights_dir,
+            pca_dim = self.config.pca_dim,
+            radseg_lang_model = self.config.radseg_lang_model,
+            radseg_lang_align = self.config.radseg_lang_align,
+            radseg_slide_crop = self.config.radseg_slide_crop,
+            radseg_slide_stride = self.config.radseg_slide_stride, 
         )
         self.embedded_keyframes = set()
     

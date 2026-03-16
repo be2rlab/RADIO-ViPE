@@ -145,7 +145,7 @@ class RADSegEncoder(ImageSemSegEncoder):
   def __init__(self,
                device: str = None,
                model_version: str = "c-radio_v3-b",
-               lang_model: str ="siglip2",
+               lang_model: str ="siglip2-g",
                return_radio_features: bool = True,
                compile: bool = False,
                amp: bool = False,

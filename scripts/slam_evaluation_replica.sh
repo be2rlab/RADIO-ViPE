@@ -6,20 +6,20 @@ export RESULTS_FOLDER=$ROOT_DIR/vipe_results
 export CUDA_VISIBLE_DEVICES=1
 export SCENE_NAMES=(
     room0
-    # room1
-    # room2 
-    # office0
-    # office1
-    # office2
-    # office3
-    # office4
+    room1
+    room2 
+    office0
+    office1
+    office2
+    office3
+    office4
 )
 
 for SCENE_NAME in ${SCENE_NAMES[*]}
 do
     printf "Running scene:   %s\n" "$SCENE_NAME"
 
-    CUDA_LAUNCH_BLOCKING=0 python3 $ROOT_DIR/run.py \
+    CUDA_VISIBLE_DEVICES=1 CUDA_LAUNCH_BLOCKING=1 python3 $ROOT_DIR/run.py \
         pipeline=replica \
         streams=frame_dir_stream \
         streams.base_path=$GT_FOLDER/$SCENE_NAME/rgb \
