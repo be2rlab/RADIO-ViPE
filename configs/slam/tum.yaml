@@ -47,6 +47,8 @@ visualize: false
 # Use keyframe depth for recovering metric depth
 keyframe_depth: metric3d-small
 
+sequence_name: 
+
 ba:
   dense_disp_alpha: 0.001
   embedding_weight: 0.001

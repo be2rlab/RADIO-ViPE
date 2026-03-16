@@ -763,6 +763,8 @@ class GraphBuffer:
             images,
             torch.stack(mask_list, dim=1),
             self.tstamp[t_range],
+            self.embeddings[t_range].permute(0,1,3,4,2),
+            self.embedding_valid_mask[t_range]
         )
 
     def log_tracks(self):
