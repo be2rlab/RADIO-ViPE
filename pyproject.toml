@@ -37,5 +37,10 @@ dependencies = [
     "click",
 ]
 
+[project.optional-dependencies]
+dav3 = [
+    "depth-anything-3 @ git+https://github.com/heiwang1997/Depth-Anything-3.git@main"
+]
+
 [project.scripts]
 vipe = "vipe.cli.main:main"

@@ -38,7 +38,13 @@ from vipe.utils.profiler import profile_function, profiler_section
 from vipe.utils.visualization import save_projection_video
 
 from . import AnnotationPipelineOutput, Pipeline
-from .processors import AdaptiveDepthProcessor, EmbeddingsProcessor, GeoCalibIntrinsicsProcessor, TrackAnythingProcessor
+from .processors import (
+    AdaptiveDepthProcessor, 
+    EmbeddingsProcessor, 
+    GeoCalibIntrinsicsProcessor, 
+    TrackAnythingProcessor,
+    MultiviewDepthProcessor
+)
 
 
 logger = logging.getLogger(__name__)
@@ -91,7 +97,10 @@ class DefaultAnnotationPipeline(Pipeline):
             )
         ]
         if (depth_align_model := self.post_cfg.depth_align_model) is not None:
-            post_processors.append(AdaptiveDepthProcessor(slam_output, view_idx, depth_align_model))
+            if depth_align_model.startswith("mvd_"):
+                post_processors.append(MultiviewDepthProcessor(slam_output, model=depth_align_model))
+            else:
+                post_processors.append(AdaptiveDepthProcessor(slam_output, view_idx, depth_align_model))
         return ProcessedVideoStream(video_stream, post_processors)
 
     @profile_function()

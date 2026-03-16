@@ -14,13 +14,13 @@ init:
     add_sky: false
 
 slam:
-  keyframe_depth: unidepth-l
+  keyframe_depth: dav3
   optimize_intrinsics: ${neq:${..init.intrinsics},"gt"}
   visualize: true
 
 # Post-processing configs
 post:
-  depth_align_model: "adaptive_unidepth-l_svda"
+  depth_align_model: "mvd_dav3"
 
 # Output configs
 output:

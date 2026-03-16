@@ -50,6 +50,10 @@ def make_depth_model(model: str, dataset: str | None = None,dataset_path: str | 
         from .moge import MogeModel
 
         return MogeModel()
+    
+    elif model_name == "dav3":
+        from .dav3 import DepthAnything3Model
 
+        return DepthAnything3Model()
     else:
         raise ValueError(f"Unknown depth model: {model}")

@@ -403,7 +403,7 @@ class SLAMSystem:
 
         with profiler_section("slam.extract_map"):
             slam_map = self.buffer.extract_slam_map(filter_thresh=self.config.map_filter_thresh)
-
+            slam_map.backend_graph = self.backend.last_graph
         # Scale back the intrinsics to the original size.
         with profiler_section("slam.recover_intrinsics"):
             original_intrinsics = torch.stack(

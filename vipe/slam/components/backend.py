@@ -41,6 +41,7 @@ class SLAMBackend:
         self.video = video
         self.args = args
         self.device = device
+        self.last_graph: torch.Tensor | None = None
 
     def _iterate_with_depth(self, graph: FactorGraph, steps: int, more_iters: bool):
         steps_preintr = steps // 2
@@ -111,6 +112,7 @@ class SLAMBackend:
             )
 
         self.video.dirty[:t] = True
+        self.last_graph = torch.stack([graph.ii, graph.jj], dim=-1)
 
         if log:
             self.video.log(self.args.map_filter_thresh)

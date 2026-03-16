@@ -17,7 +17,7 @@ import torch
 
 
 try:
-    from moge.model.v1 import MoGeModel
+    from moge.model.v2 import MoGeModel
 except ModuleNotFoundError:
     MoGeModel = None
 
@@ -42,7 +42,7 @@ class MogeModel(DepthEstimationModel):
             raise RuntimeError(
                 "moge is not found in the environment. You can install it via pip install `git+https://github.com/microsoft/MoGe.git`"
             )
-        self.model = MoGeModel.from_pretrained("Ruicheng/moge-vitl")
+        self.model = MoGeModel.from_pretrained("Ruicheng/moge-2-vitl-normal")
         self.model = self.model.cuda().eval()
 
     @property

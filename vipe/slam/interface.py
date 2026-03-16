@@ -34,6 +34,8 @@ class SLAMMap:
     dense_disp_packinfo: torch.Tensor
     # Actual frame indices of the dense_disp_xyz (assert sorted)
     dense_disp_frame_inds: list[int]
+    # (Q, 2) keyframe graphs (index into dense_disp_frame_inds)
+    backend_graph: torch.Tensor | None = None
     # Optional (M, C) tensor of embeddings aligned with dense_disp_xyz
     dense_disp_embeddings: torch.Tensor | None = None
     # Optional (M,) bool tensor signaling whether the embedding at the same index is valid
@@ -93,6 +95,7 @@ class SLAMMap:
         tstamps: torch.Tensor,
         embeddings: torch.Tensor | None = None,
         embedding_mask: torch.Tensor | None = None,
+        backend_graph: torch.Tensor | None = None
     ):
         """
         xyz: (N, V, H, W, 3)
@@ -101,6 +104,7 @@ class SLAMMap:
         tstamps: (N,)
         embeddings: (N, V, H, W, C) or None
         embedding_mask: (N, V, H, W) bool mask denoting valid embeddings (defaults to mask if None)
+        backend_graph: (Q, 2)
         """
         assert torch.all(tstamps[1:] > tstamps[:-1]), "Timestamps should be sorted."
         N, V, H, W, C = xyz.shape
@@ -132,6 +136,7 @@ class SLAMMap:
             dense_disp_frame_inds=tstamps.tolist(),
             dense_disp_embeddings=embeddings_flat,
             dense_disp_embedding_valid=embedding_valid_flat,
+            backend_graph=backend_graph,
         )
 
     def has_embeddings(self) -> bool:

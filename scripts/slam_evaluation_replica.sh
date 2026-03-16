@@ -10,7 +10,7 @@ export SCENE_NAMES=(
     # office0
     # office1
     # office2
-    office3
+    office_3
     # office4
 )
 
