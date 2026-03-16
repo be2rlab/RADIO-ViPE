@@ -39,7 +39,7 @@ RUN pip install ultralytics
 COPY ../envs/ envs/
 
 RUN pip install -r envs/requirements.txt
-
+RUN pip install git+https://github.com/microsoft/moge.git
 
 RUN apt update && apt install -y libeigen3-dev zlib1g-dev
 

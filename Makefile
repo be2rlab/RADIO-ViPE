@@ -22,8 +22,8 @@ DOCKER_COMPOSE_FILES := \
 # ------------------------------------------------------------------------------
 
 RENDER_DISPLAY := $(DISPLAY)
-CACHE_DIR?=/home/jaafar/dev/SBER/data/Cache
-DATA_DIR?=/home/jaafar/dev/SBER/data/Benchmarks
+CACHE_DIR?=/home/sber_pn/data/Cache
+DATA_DIR?=/home/sber_pn/data
 USER_ID=1000#$(UID)
 GROUP_ID=1000#$(GID)
 DOCKERFILE := Dockerfile
