@@ -12,7 +12,6 @@ init:
     # phrases: 
     #   - person
     # add_sky: false
-    
 slam:
   keyframe_depth: unidepth-l
   optimize_intrinsics: ${neq:${..init.intrinsics},"gt"}

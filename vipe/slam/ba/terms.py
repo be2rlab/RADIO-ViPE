@@ -1,17 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# vipe/slam/ba/terms.py
 
 import logging
 
@@ -132,7 +119,7 @@ class DenseDepthFlowTerm(SolverTerm):
         embeddings: torch.Tensor,
         embedding_weight: torch.Tensor | float,
         embedding_valid_mask: torch.Tensor | None = None,
-        chunk_size: int = 4,
+        chunk_size: int = 2,
         residual_scale: float = 1.0,
         use_photometric_residual: bool = False,
         debug_options: dict[str, Any] | None = None,
@@ -174,8 +161,9 @@ class DenseDepthFlowTerm(SolverTerm):
         self.embeddings = embeddings
         if embeddings is not None:
             assert embeddings.dim() == 4, "Embeddings must be shaped (N_views, C, H, W)"
-            self.embeddings = embeddings.float()
-            self.embeddings_norm = F.normalize(self.embeddings, dim=1, eps=1e-8)
+            self.embeddings_norm = embeddings.half()
+            # Change: 
+            # self.embeddings_norm = F.normalize(self.embeddings, dim=1, eps=1e-8)
 
             self.embedding_valid_mask = embedding_valid_mask
             if embedding_valid_mask is not None:
@@ -210,6 +198,7 @@ class DenseDepthFlowTerm(SolverTerm):
             self._forward_calls = 0
             self._debug_saved = 0
             self._active = True
+            self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     def group_names(self) -> set[str]:
         names = {"pose", "dense_disp"}
@@ -305,7 +294,7 @@ class DenseDepthFlowTerm(SolverTerm):
                     data=torch.cat([Jri, Jrj], dim=0),
                 )
         if self.embeddings is not None and self.use_semantic_kernel:
-            emedding_redisdual, embedding_residual_weights = self.compute_embedding_residuals(coords,valid,'cuda:0')
+            emedding_redisdual, embedding_residual_weights = self.compute_embedding_residuals(coords,valid, self.device)
             emedding_redisdual = 1- emedding_redisdual
             self.calculate_alpha(emedding_redisdual,embedding_residual_weights)
             self.alpha = torch.repeat_interleave(self.alpha, 2, dim=1)
@@ -587,8 +576,8 @@ class EmbeddingSimilarityTerm(SolverTerm):
 
         # Store raw embeddings and a pre-normalized copy for the *source* (no sampling on source)
         assert embeddings.dim() == 4, "Embeddings must be shaped (N_views, C, H, W)"
-        self.embeddings = embeddings.float()
-        self.embeddings_norm = F.normalize(self.embeddings, dim=1, eps=1e-8)
+        self.embeddings = embeddings.half()
+        self.embeddings_norm = self.embeddings
 
         self.embedding_valid_mask = embedding_valid_mask
         if embedding_valid_mask is not None:

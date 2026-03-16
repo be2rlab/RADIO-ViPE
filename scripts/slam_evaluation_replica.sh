@@ -3,6 +3,7 @@
 export ROOT_DIR=/home/user/km-vipe
 export GT_FOLDER=/data/Replica
 export RESULTS_FOLDER=$ROOT_DIR/vipe_results
+export CUDA_VISIBLE_DEVICES=1
 export SCENE_NAMES=(
     room0
     room1

@@ -8,6 +8,7 @@ defaults:
 
 ray: false
 prefilter: false
+# memory_profiler: true
 
 hydra:
   output_subdir: null
