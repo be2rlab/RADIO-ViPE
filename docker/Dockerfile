@@ -33,7 +33,10 @@ RUN apt-get update && apt-get install -y \
   libx11-xcb1 libxcb1 libxcb-render0 libxcb-shape0 libxcb-xfixes0 \
   libgl1 libvulkan1
 
-RUN pip install ultralytics
+RUN pip install ultralytics \
+                segment-anything-py \
+                open-clip-torch \
+                transformers==5.3.0
 # RUN git clone https://github.com/facebookresearch/dinov3.git /home/${USER}/dinov3
 
 COPY ../envs/ envs/
@@ -45,6 +48,7 @@ RUN apt update && apt install -y libeigen3-dev zlib1g-dev
 
 RUN pip install scikit-learn
 RUN pip install ftfy regex tqdm
+RUN pip install transformers==4.52
 
 WORKDIR /home/${USER}/km-vipe
 

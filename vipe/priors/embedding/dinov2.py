@@ -70,7 +70,8 @@ _ALIAS_NORMALIZATION = {
 
 
 def _normalize_alias(x: str) -> str:
-    s = x.lower().replace("_", "").replace("-", "")
+    # s = x.lower().replace("_", "").replace("-", "")
+    s = x.lower()
     if s.startswith("dinov2"):
         s = s.replace("dinov2", "", 1)
     s = s.strip()
@@ -82,6 +83,7 @@ def get_config(variant: Alias) -> DinoV2Config:
     if isinstance(variant, DinoV2Variant):
         return REGISTRY[variant]
     norm = _normalize_alias(variant)
+    print(f"Normalized alias: {norm}")
     for v in DinoV2Variant:
         if v.value == norm:
             return REGISTRY[v]
@@ -105,115 +107,6 @@ class ResizeTransform(nn.Module):
             (h_patches * self.patch_size, w_patches * self.patch_size),
             interpolation=TVT.InterpolationMode.BICUBIC,
         )
-
-
-class PyramidUpsampler:
-    """Handles multi-scale feature upsampling with different blending strategies."""
-
-    def __init__(
-        self,
-        scales: Optional[List[float]] = None,
-        blend_mode: Literal["weighted", "average", "max"] = "weighted",
-        device: str = "cuda",
-    ):
-        self.scales = scales or [1.0, 0.75, 0.5]
-        self.blend_mode = blend_mode
-        self.device = device
-
-    def upsample_single_scale(
-        self,
-        features: Tensor,
-        target_size: Tuple[int, int],
-        mode: Literal["bilinear", "bicubic"] = "bilinear",
-    ) -> Tensor:
-        """Upsample features to target size using single-scale interpolation."""
-        device = features.device
-        h, w = features.shape[:2] if features.dim() == 3 else features.shape[2:4]
-
-        if (h, w) == target_size:
-            return features if features.dim() == 3 else features.squeeze(0).permute(1, 2, 0)
-
-        if features.dim() == 3:
-            features = features.permute(2, 0, 1).unsqueeze(0)  # [1, D, H, W]
-
-        interp_kwargs = {"size": target_size, "mode": mode, "antialias": True}
-        if mode == "bilinear":
-            interp_kwargs["align_corners"] = False
-
-        upsampled = F.interpolate(features, **interp_kwargs)
-        del features
-
-        result = upsampled.squeeze(0).permute(1, 2, 0)
-        if result.is_contiguous():
-            result = result.contiguous()
-
-        del upsampled
-        if device.type == "cuda":
-            torch.cuda.empty_cache()
-
-        return result
-
-    def upsample_pyramid(self, features_pyramid: List[Tensor], target_size: Tuple[int, int]) -> Tensor:
-        """
-        Upsample and blend pyramid features.
-        Args:
-            features_pyramid: List of [H_i, W_i, D] tensors at different scales
-            target_size: (H_target, W_target) final resolution
-        Returns:
-            Blended features: [H_target, W_target, D]
-        """
-        if not features_pyramid:
-            raise ValueError("Empty feature pyramid")
-
-        D = features_pyramid[0].shape[-1]
-
-        # Use the same device as input features
-        device = features_pyramid[0].device
-
-        # Initialize accumulators
-        accumulated = torch.zeros(target_size[0], target_size[1], D, device=device)
-        weights = (
-            torch.zeros(target_size[0], target_size[1], 1, device=device)
-            if self.blend_mode in ["weighted", "average"]
-            else None
-        )
-        for i, feats in enumerate(features_pyramid):
-            upsampled = self.upsample_single_scale(feats, target_size, mode="bilinear")
-
-            current_blend_mode = self.blend_mode
-
-            if current_blend_mode == "weighted":
-                scale_weight = self.scales[i] if i < len(self.scales) else 1.0
-                accumulated.add_(upsampled, alpha=scale_weight)
-                weights.add_(scale_weight)
-
-            elif current_blend_mode == "average":
-                accumulated.add_(upsampled)
-                weights.add_(1.0)
-
-            elif current_blend_mode == "max":
-                if i == 0:
-                    accumulated = upsampled.clone()
-                else:
-                    torch.maximum(accumulated, upsampled, out=accumulated)
-            else:
-                raise ValueError(f"Unknown blend mode: {current_blend_mode}")
-
-            del upsampled
-
-            if device.type == "cuda" and (i + 1) % 3 == 0:
-                torch.cuda.empty_cache()
-
-        if current_blend_mode in ["weighted", "average"]:
-            result = accumulated.div_(weights + 1e-8)
-            del weights
-        else:
-            result = accumulated
-
-        if device.type == "cuda":
-            torch.cuda.empty_cache()
-
-        return result
 
 
 class DINOv2EmbeddingEngine:
@@ -390,7 +283,7 @@ class DINOv2EmbeddingEngine:
             feats = feats.permute(0, 2, 3, 1).contiguous()  # [B,h,w,D]
         return feats
 
-    def embed_frame_multiscale(
+    def _extract_dino_features_multiscale(
         self, image: Union[Image.Image, Tensor], scales: Optional[List[float]] = None
     ) -> List[Tensor]:
         """Extract features at multiple input scales. Returns list[[h_i, w_i, D], ...]."""
@@ -454,7 +347,10 @@ class DINOv2EmbeddingEngine:
             return self.upsampler.upsample_pyramid(features, target_size)
         else:
             if not isinstance(features, Tensor):
-                raise ValueError("Single-scale methods require a Tensor.")
+                if len(features) == 1:
+                    features = features[0]
+                else:
+                    raise ValueError("Single-scale methods require a Tensor.")
             if method not in ("bilinear", "bicubic"):
                 raise ValueError(f"Unknown upsample method: {method}")
             return self.upsampler.upsample_single_scale(features, target_size, mode=method)
@@ -671,7 +567,7 @@ def demo_usage():
             # Extract multi-scale features
             print("Extracting multi-scale features...")
             t_start = time.time()
-            features_pyramid = engine.embed_frame_multiscale(last_img)
+            features_pyramid = engine._extract_dino_features_multiscale(last_img)
             t_end = time.time()
             print(f"Multi-scale extraction done in {t_end - t_start:.3f}s")
             for idx, feat in enumerate(features_pyramid):

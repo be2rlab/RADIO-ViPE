@@ -148,24 +148,18 @@ class SLAMSystem:
             print(f"Using depth model: {self.metric_depth.depth_type}")
         else:
             print("No depth model used!!!!")
-        model_family: DinoBackboneFamily = DinoBackboneFamily.DINOV2
-        model_variant: str | DinoV3Variant | DinoV2Variant = DinoV2Variant.VITB_REG
+        # model_family: DinoBackboneFamily = DinoBackboneFamily.DINOV2
+        # model_variant: str | DinoV3Variant | DinoV2Variant = DinoV2Variant.VITB_REG
         weights_dir = "/home/user/km-vipe/weights/dinov2"
-        # weights_dir = None
-        # if model_variant == DinoV3Variant:
-        #     weights_dir = "/home/user/km-vipe/weights/dinov3"
-        # elif model_variant == DinoV2Variant:
-        #     weights_dir = "/home/user/km-vipe/weights/dinov2"
-        # else:
-        #     print("Not clear model Variant!!!")
-        self.pca_state_path = Path("/home/user/km-vipe/vipe_results/vipe/pca_basis.pt")
+        self.pca_state_path = Path(f"/home/user/km-vipe/vipe_results/vipe/{self.config.sequence_name}_pca_basis.pt")
         self._pca_state_saved = False
         self.embedder = EmbeddingsPipeline(
-            model_family=model_family,
-            model_variant=model_variant,
+            model_family=self.config.model_family,
+            model_variant=self.config.model_variant,
             weights_dir=weights_dir,
         )
         self.embedded_keyframes = set()
+    
 
     def _maybe_save_pca_state(self) -> None:
         if self._pca_state_saved or self.pca_state_path is None:
@@ -224,22 +218,14 @@ class SLAMSystem:
                 self.buffer.poses[kf_idx] = (SE3(self.buffer.rig[view_idx]) * frame_data.pose.inv()).data
 
             if self.embedder is not None and kf_idx not in self.embedded_keyframes:
-                # print(f"[EMBEDDER] Running on keyframe_idx={kf_idx}, frame_idx={frame_idx}")
-                frame_data.features, frame_data.features_patch_size = self.embedder.process_frame(frame_data)
-                # self._maybe_save_pca_state()
-                self.embedded_keyframes.add(kf_idx)
+                features_list, frame_idx_list, view_idx_list= self.embedder.process_frame(frame_data,kf_idx,view_idx)
+                if features_list is not None:
+                    self._maybe_save_pca_state()
+                    for features, frame_idx, view_idx in zip(features_list, frame_idx_list, view_idx_list):
+                        self.embedded_keyframes.add(frame_idx)
+                        features = features.permute(2, 0, 1).to(self.device, dtype=torch.float32)
+                        self.buffer.set_embeddings(frame_idx, view_idx, features)
 
-            if frame_data.features is not None:
-                features = frame_data.features.permute(2, 0, 1).to(self.device, dtype=torch.float32)
-                resized_features = F.interpolate(
-                    features.unsqueeze(0),
-                    size=(self.buffer.height // 8, self.buffer.width // 8),
-                    mode="bilinear",
-                    align_corners=False,
-                ).squeeze(0)
-                self.buffer.set_embeddings(kf_idx, view_idx, resized_features)
-            else:
-                self.buffer.set_embeddings(kf_idx, view_idx, None)
 
         if phase == 1:
             self.buffer.update_disps_sens(self.metric_depth, frame_idx=kf_idx)

@@ -7,16 +7,18 @@ instance: vipe.pipeline.default.DefaultAnnotationPipeline
 init:
   camera_type: "pinhole"
   intrinsics: "geocalib"
-  instance:
-    kf_gap_sec: 2.0
-    phrases: 
-      - gun
-    add_sky: false
+  instance: null
+    # kf_gap_sec: 2.0
+    # phrases: 
+    #   - person
+    # add_sky: false
 
 slam:
   keyframe_depth: unidepth-l
   optimize_intrinsics: ${neq:${..init.intrinsics},"gt"}
   visualize: true
+  model_family: "radseg"
+  model_variant: vitb14_reg
 
 # Post-processing configs
 post:
