@@ -51,8 +51,8 @@ sequence_name:
 
 ba:
   dense_disp_alpha: 0.001
-  embedding_weight: 0.001
-  use_semantic_kernel: true
+  embedding_weight: 0.01
+  # use_semantic_kernel: true
   # embedding_fine_iters: 4  # number of final BA iterations that include embedding term
   embedding_debug:
     enabled: false

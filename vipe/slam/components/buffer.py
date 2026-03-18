@@ -242,16 +242,10 @@ class GraphBuffer:
             if self.embedding_valid_mask is not None:
                 self.embedding_valid_mask[frame_idx, view_idx] = False
             return
-        # Change:
-        # add
-        embeddings = torch.nn.functional.normalize(embeddings, dim=1, eps=1e-8)
-        # end change
         embed_dim = embeddings.shape[0]
         height, width = embeddings.shape[1:]
         self._ensure_embedding_storage(embed_dim, height, width)
         assert self.embeddings is not None and self.embedding_valid_mask is not None
-        # Change:
-        # self.embeddings[frame_idx, view_idx] = embeddings.to(self.device, dtype=torch.float32)
         self.embeddings[frame_idx, view_idx] = embeddings.to(self.device, dtype=torch.float16)
         self.embedding_valid_mask[frame_idx, view_idx] = True
 

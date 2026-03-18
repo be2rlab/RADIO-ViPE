@@ -119,7 +119,7 @@ class DenseDepthFlowTerm(SolverTerm):
         embeddings: torch.Tensor,
         embedding_weight: torch.Tensor | float,
         embedding_valid_mask: torch.Tensor | None = None,
-        chunk_size: int = 2,
+        chunk_size: int = 4,
         residual_scale: float = 1.0,
         use_photometric_residual: bool = False,
         debug_options: dict[str, Any] | None = None,
@@ -161,9 +161,6 @@ class DenseDepthFlowTerm(SolverTerm):
         self.embeddings = embeddings
         if embeddings is not None:
             assert embeddings.dim() == 4, "Embeddings must be shaped (N_views, C, H, W)"
-            self.embeddings_norm = embeddings.half()
-            # Change: 
-            # self.embeddings_norm = F.normalize(self.embeddings, dim=1, eps=1e-8)
 
             self.embedding_valid_mask = embedding_valid_mask
             if embedding_valid_mask is not None:
@@ -329,10 +326,11 @@ class DenseDepthFlowTerm(SolverTerm):
             tgt_idx = self.dense_disp_j_inds[cs]
 
             # Normalized source (no sampling)
-            source_norm = self.embeddings_norm[src_idx]  # (N, C, H, W)
+            source_raw = self.embeddings[src_idx].float() # (N, C, H, W)
+            source_norm = F.normalize(source_raw, dim=1, eps=1e-8)  
 
             # Target: raw features (will be normalized AFTER sampling)
-            target_raw_full = self.embeddings[tgt_idx]  # (N, C, H, W)
+            target_raw_full = self.embeddings[tgt_idx].float()   # (N, C, H, W)
 
             coords_chunk = coords[cs]  # (N, H, W, 2)
             valid_chunk = valid[cs]  # (N, H, W, 1)
@@ -576,8 +574,7 @@ class EmbeddingSimilarityTerm(SolverTerm):
 
         # Store raw embeddings and a pre-normalized copy for the *source* (no sampling on source)
         assert embeddings.dim() == 4, "Embeddings must be shaped (N_views, C, H, W)"
-        self.embeddings = embeddings.half()
-        self.embeddings_norm = self.embeddings
+        self.embeddings = embeddings
 
         self.embedding_valid_mask = embedding_valid_mask
         if embedding_valid_mask is not None:
@@ -826,10 +823,11 @@ class EmbeddingSimilarityTerm(SolverTerm):
             tgt_idx = self.dense_disp_j_inds[cs]
 
             # Normalized source (no sampling)
-            source_norm = self.embeddings_norm[src_idx]  # (N, C, H, W)
+            source_raw = self.embeddings[src_idx].float() # (N, C, H, W)
+            source_norm = F.normalize(source_raw, dim=1, eps=1e-8)  
 
             # Target: raw features (will be normalized AFTER sampling)
-            target_raw_full = self.embeddings[tgt_idx]  # (N, C, H, W)
+            target_raw_full = self.embeddings[tgt_idx].float()  # (N, C, H, W)
 
             coords_chunk = coords[cs]  # (N, H, W, 2)
             valid_chunk = valid[cs]  # (N, H, W, 1)

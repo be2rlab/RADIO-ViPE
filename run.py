@@ -56,7 +56,7 @@ def run(args: DictConfig) -> None:
 
             if memory_profiling:
                 torch.cuda.reset_peak_memory_stats()
-                torch.cuda.memory._record_memory_history()
+                torch.cuda.memory._record_memory_history(max_entries=100000)
                 log_mem(f"before:{video_stream.name()}", logger)
 
             try:
