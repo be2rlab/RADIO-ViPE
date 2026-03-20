@@ -125,9 +125,7 @@ class FileIntrinsicsProcessor(IntrinsicEstimationProcessor):
         intrinsics_path = Path(intrinsics_path)
         assert intrinsics_path.exists(), f"Intrinsics file does not exist: {intrinsics_path}"
 
-        with np.load(intrinsics_path) as data:
-            intrinsics_data = torch.from_numpy(data["data"]).float()
-            frame_inds = np.asarray(data["inds"]) if "inds" in data.files else np.arange(intrinsics_data.shape[0])
+        intrinsics_data, frame_inds = self._load_intrinsics_file(intrinsics_path)
 
         if intrinsics_data.ndim == 1:
             intrinsics_data = intrinsics_data[None]
@@ -161,6 +159,54 @@ class FileIntrinsicsProcessor(IntrinsicEstimationProcessor):
         frame.intrinsics = intrinsics.clone()
         frame.camera_type = self.camera_type
         return frame
+
+    @staticmethod
+    def _load_intrinsics_file(intrinsics_path: Path) -> tuple[torch.Tensor, np.ndarray]:
+        if intrinsics_path.suffix == ".npz":
+            with np.load(intrinsics_path) as data:
+                intrinsics_data = torch.from_numpy(data["data"]).float()
+                frame_inds = np.asarray(data["inds"]) if "inds" in data.files else np.arange(intrinsics_data.shape[0])
+            return intrinsics_data, frame_inds
+
+        if intrinsics_path.suffix == ".txt":
+            return FileIntrinsicsProcessor._load_intrinsics_txt(intrinsics_path)
+
+        raise ValueError(f"Unsupported intrinsics file format: {intrinsics_path.suffix}")
+
+    @staticmethod
+    def _load_intrinsics_txt(intrinsics_path: Path) -> tuple[torch.Tensor, np.ndarray]:
+        rows: list[list[float]] = []
+        frame_inds: list[int] = []
+
+        for line_idx, raw_line in enumerate(intrinsics_path.read_text().splitlines(), start=1):
+            line = raw_line.split("#", 1)[0].strip()
+            if not line:
+                continue
+
+            if ":" in line:
+                frame_prefix, values_str = line.split(":", 1)
+                try:
+                    frame_idx = int(frame_prefix.strip())
+                except ValueError as exc:
+                    raise ValueError(
+                        f"Invalid frame index on line {line_idx} in {intrinsics_path}: {frame_prefix!r}"
+                    ) from exc
+            else:
+                frame_idx = len(frame_inds)
+                values_str = line
+
+            values = [float(value) for value in values_str.replace(",", " ").split()]
+            rows.append(values)
+            frame_inds.append(frame_idx)
+
+        if not rows:
+            raise ValueError(f"No intrinsics found in {intrinsics_path}")
+
+        row_lengths = {len(row) for row in rows}
+        if len(row_lengths) != 1:
+            raise ValueError(f"Inconsistent intrinsics dimensions in {intrinsics_path}")
+
+        return torch.tensor(rows, dtype=torch.float32), np.asarray(frame_inds)
 
 
 class TrackAnythingProcessor(StreamProcessor):
