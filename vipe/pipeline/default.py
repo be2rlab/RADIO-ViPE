@@ -38,7 +38,13 @@ from vipe.utils.profiler import profile_function, profiler_section
 from vipe.utils.visualization import save_projection_video
 
 from . import AnnotationPipelineOutput, Pipeline
-from .processors import AdaptiveDepthProcessor, EmbeddingsProcessor, GeoCalibIntrinsicsProcessor, TrackAnythingProcessor
+from .processors import (
+    AdaptiveDepthProcessor,
+    EmbeddingsProcessor,
+    FileIntrinsicsProcessor,
+    GeoCalibIntrinsicsProcessor,
+    TrackAnythingProcessor,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -66,7 +72,20 @@ class DefaultAnnotationPipeline(Pipeline):
         assert FrameAttribute.METRIC_DEPTH not in video_stream.attributes()
         assert FrameAttribute.INSTANCE not in video_stream.attributes()
 
-        init_processors.append(GeoCalibIntrinsicsProcessor(video_stream, camera_type=self.camera_type))
+        if self.init_cfg.intrinsics == "geocalib":
+            init_processors.append(GeoCalibIntrinsicsProcessor(video_stream, camera_type=self.camera_type))
+        elif self.init_cfg.intrinsics == "file":
+            assert self.init_cfg.intrinsics_path is not None, "init.intrinsics_path must be set for file intrinsics"
+            init_processors.append(
+                FileIntrinsicsProcessor(
+                    video_stream,
+                    intrinsics_path=Path(self.init_cfg.intrinsics_path),
+                    camera_type=self.camera_type,
+                )
+            )
+        else:
+            raise ValueError(f"Unknown intrinsics init mode: {self.init_cfg.intrinsics}")
+
         if self.init_cfg.instance is not None:
             init_processors.append(
                 TrackAnythingProcessor(
@@ -100,7 +119,6 @@ class DefaultAnnotationPipeline(Pipeline):
             video_streams = [video_data[view_idx] for view_idx in range(len(video_data))]
             artifact_paths = [io.ArtifactPath(self.out_path, video_stream.name()) for video_stream in video_streams]
             slam_rig = video_data.rig()
-
         else:
             assert isinstance(video_data, VideoStream)
             video_streams = [video_data]

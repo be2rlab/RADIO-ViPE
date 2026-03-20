@@ -108,6 +108,61 @@ class GeoCalibIntrinsicsProcessor(IntrinsicEstimationProcessor):
             self.distortion = [res["camera"].dist[0, 0].item()]
 
 
+class FileIntrinsicsProcessor(IntrinsicEstimationProcessor):
+    """Load intrinsics from a saved artifact file."""
+
+    def __init__(
+        self,
+        video_stream: VideoStream,
+        intrinsics_path: str | Path,
+        camera_type: CameraType = CameraType.PINHOLE,
+    ) -> None:
+        super().__init__(video_stream)
+        self.camera_type = camera_type
+        self.shared_intrinsics: torch.Tensor | None = None
+        self.intrinsics_by_frame: dict[int, torch.Tensor] = {}
+
+        intrinsics_path = Path(intrinsics_path)
+        assert intrinsics_path.exists(), f"Intrinsics file does not exist: {intrinsics_path}"
+
+        with np.load(intrinsics_path) as data:
+            intrinsics_data = torch.from_numpy(data["data"]).float()
+            frame_inds = np.asarray(data["inds"]) if "inds" in data.files else np.arange(intrinsics_data.shape[0])
+
+        if intrinsics_data.ndim == 1:
+            intrinsics_data = intrinsics_data[None]
+            frame_inds = np.array([0])
+
+        expected_dim = camera_type.intrinsics_dim()
+        assert intrinsics_data.shape[-1] == expected_dim, (
+            f"Expected intrinsics dimension {expected_dim} for {camera_type.name}, "
+            f"got {intrinsics_data.shape[-1]} from {intrinsics_path}"
+        )
+
+        if intrinsics_data.shape[0] == 1:
+            self.shared_intrinsics = intrinsics_data[0]
+            return
+
+        self.intrinsics_by_frame = {
+            int(frame_idx): intrinsics_data[row_idx] for row_idx, frame_idx in enumerate(frame_inds.tolist())
+        }
+        expected_frame_inds = set(range(len(video_stream)))
+        if set(self.intrinsics_by_frame) != expected_frame_inds:
+            raise ValueError(
+                f"{intrinsics_path} must contain either a single intrinsics row or entries for every frame "
+                f"in the stream (expected indices 0..{len(video_stream) - 1})"
+            )
+
+    def __call__(self, frame_idx: int, frame: VideoFrame) -> VideoFrame:
+        intrinsics = self.shared_intrinsics
+        if intrinsics is None:
+            intrinsics = self.intrinsics_by_frame.get(frame_idx)
+        assert intrinsics is not None, f"Missing intrinsics for frame {frame_idx}"
+        frame.intrinsics = intrinsics.clone()
+        frame.camera_type = self.camera_type
+        return frame
+
+
 class TrackAnythingProcessor(StreamProcessor):
     """
     A processor that tracks a mask caption in the video.
