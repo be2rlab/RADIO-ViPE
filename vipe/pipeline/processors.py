@@ -14,6 +14,7 @@
 # limitations under the License.
 
 
+import json
 import logging
 
 from pathlib import Path
@@ -162,14 +163,19 @@ class FileIntrinsicsProcessor(IntrinsicEstimationProcessor):
 
     @staticmethod
     def _load_intrinsics_file(intrinsics_path: Path) -> tuple[torch.Tensor, np.ndarray]:
-        if intrinsics_path.suffix == ".npz":
+        suffix = intrinsics_path.suffix.lower()
+
+        if suffix == ".npz":
             with np.load(intrinsics_path) as data:
                 intrinsics_data = torch.from_numpy(data["data"]).float()
                 frame_inds = np.asarray(data["inds"]) if "inds" in data.files else np.arange(intrinsics_data.shape[0])
             return intrinsics_data, frame_inds
 
-        if intrinsics_path.suffix == ".txt":
+        if suffix == ".txt":
             return FileIntrinsicsProcessor._load_intrinsics_txt(intrinsics_path)
+
+        if suffix == ".json":
+            return FileIntrinsicsProcessor._load_intrinsics_json(intrinsics_path)
 
         raise ValueError(f"Unsupported intrinsics file format: {intrinsics_path.suffix}")
 
@@ -207,6 +213,24 @@ class FileIntrinsicsProcessor(IntrinsicEstimationProcessor):
             raise ValueError(f"Inconsistent intrinsics dimensions in {intrinsics_path}")
 
         return torch.tensor(rows, dtype=torch.float32), np.asarray(frame_inds)
+
+    @staticmethod
+    def _load_intrinsics_json(intrinsics_path: Path) -> tuple[torch.Tensor, np.ndarray]:
+        payload = json.loads(intrinsics_path.read_text())
+        camera = payload.get("camera", payload)
+
+        required_keys = ("fx", "fy", "cx", "cy")
+        missing_keys = [key for key in required_keys if key not in camera]
+        if missing_keys:
+            raise ValueError(
+                f"Missing required intrinsics keys in {intrinsics_path}: {', '.join(missing_keys)}"
+            )
+
+        row = [float(camera[key]) for key in required_keys]
+        if "k1" in camera:
+            row.append(float(camera["k1"]))
+
+        return torch.tensor([row], dtype=torch.float32), np.asarray([0])
 
 
 class TrackAnythingProcessor(StreamProcessor):
