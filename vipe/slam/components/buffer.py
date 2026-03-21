@@ -462,7 +462,13 @@ class GraphBuffer:
             embedding_term_activation_iter = n_iters
             embedding_term = None
             embedding_weight = float(getattr(self.ba_config, "embedding_weight", 0.0))
-            use_semantic_kernel = bool(getattr(self.ba_config,"use_semantic_kernel",False))
+            use_semantic_kernel = bool(getattr(self.ba_config, "use_semantic_kernel", False))
+            use_temporal_stability = bool(getattr(self.ba_config, "use_temporal_stability", True))
+            thresh_static = float(getattr(self.ba_config, "thresh_static", 0.75))
+            thresh_movable = float(getattr(self.ba_config, "thresh_movable", 0.35))
+            alpha_static = float(getattr(self.ba_config, "alpha_static", 2.0))
+            alpha_huber = float(getattr(self.ba_config, "alpha_huber", 1.0))
+            alpha_dynamic = float(getattr(self.ba_config, "alpha_dynamic", -2.0))
             embedding_weight_map: torch.Tensor | None = None
             if self.embeddings is not None or use_semantic_kernel:
                 embedding_valid = self.flattened_embedding_valid_mask if self.embedding_valid_mask is not None else None
@@ -495,8 +501,14 @@ class GraphBuffer:
                     rig=None,
                     image_size=(self.height // 8, self.width // 8),
                     camera_type=self.camera_type,
-                    use_semantic_kernel = use_semantic_kernel,
-                ),AdaptiveBarronRobustKernel()
+                    use_semantic_kernel=use_semantic_kernel,
+                    use_temporal_stability=use_temporal_stability,
+                    thresh_static=thresh_static,
+                    thresh_movable=thresh_movable,
+                    alpha_static=alpha_static,
+                    alpha_huber=alpha_huber,
+                    alpha_dynamic=alpha_dynamic,
+                ), AdaptiveBarronRobustKernel()
             )
 
             if self.embeddings is not None and embedding_weight > 0.0:
