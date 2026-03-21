@@ -15,7 +15,7 @@ init:
     # add_sky: false
 slam:
   keyframe_depth: unidepth-l
-  optimize_intrinsics: ${neq:${..init.intrinsics},"gt"}
+  optimize_intrinsics: ${eq:${..init.intrinsics},"geocalib"}
   visualize: true
   model_family: "radseg"
   model_variant: "c-radio_v3-b"

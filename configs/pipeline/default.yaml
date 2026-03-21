@@ -24,7 +24,7 @@ init:
 
 slam:
   keyframe_depth: unidepth-l
-  optimize_intrinsics: ${neq:${..init.intrinsics},"gt"}
+  optimize_intrinsics: ${eq:${..init.intrinsics},"geocalib"}
   visualize: true
 
 # Post-processing configs

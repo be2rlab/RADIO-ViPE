@@ -6,8 +6,8 @@ instance: vipe.pipeline.default.DefaultAnnotationPipeline
 # Init configs
 init:
   camera_type: "pinhole"
-  intrinsics: "geocalib"
-  intrinsics_path: null
+  intrinsics: "file"
+  intrinsics_path: "/data/Replica/cam_params.json"
   instance: null
     # kf_gap_sec: 2.0
     # phrases: 
@@ -16,7 +16,7 @@ init:
 
 slam:
   keyframe_depth: unidepth-l
-  optimize_intrinsics: ${neq:${..init.intrinsics},"gt"}
+  optimize_intrinsics: ${eq:${..init.intrinsics},"geocalib"}
   visualize: true
   model_family: "radseg"
   model_variant: "c-radio_v3-b"

@@ -60,6 +60,9 @@ class DefaultAnnotationPipeline(Pipeline):
         self.out_path = Path(self.out_cfg.path)
         self.out_path.mkdir(exist_ok=True, parents=True)
         self.camera_type = CameraType(self.init_cfg.camera_type)
+        if self.init_cfg.intrinsics == "file" and self.slam_cfg.optimize_intrinsics:
+            logger.info("Disabling SLAM intrinsics optimization because init.intrinsics=file")
+            self.slam_cfg.optimize_intrinsics = False
 
     @profile_function()
     def _add_init_processors(self, video_stream: VideoStream, artifact_path: io.ArtifactPath) -> ProcessedVideoStream:
