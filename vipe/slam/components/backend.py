@@ -84,6 +84,7 @@ class SLAMBackend:
             max_factors=16 * t,
             incremental=False,
             cross_view=self.args.cross_view,
+            use_semantic_flow_init=getattr(self.args, "use_semantic_flow_init", False),
         )
 
         graph.add_proximity_factors(

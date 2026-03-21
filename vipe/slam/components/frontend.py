@@ -44,6 +44,7 @@ class SLAMFrontend:
             max_factors=48,
             incremental=True,
             cross_view=args.cross_view,
+            use_semantic_flow_init=getattr(args, "use_semantic_flow_init", False),
         )
 
         # Number of frames that the frontend has so far optimized.

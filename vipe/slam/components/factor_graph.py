@@ -23,12 +23,14 @@ import warnings
 import numpy as np
 import rerun as rr
 import torch
+import torch.nn.functional as F
 
 from einops import rearrange
 
 from vipe.ext.lietorch import SE3
 
 from ..networks.droid_net import AltCorrBlock, CorrBlock, DroidNet
+from ..semantic_flow import blend_flow_prior, semantic_flow_init
 from .buffer import GraphBuffer
 
 
@@ -54,6 +56,7 @@ class FactorGraph:
         max_factors: int,
         incremental: bool,
         cross_view: bool,
+        use_semantic_flow_init: bool = False,
     ):
         self.net = net
         self.buffer = buffer
@@ -61,6 +64,7 @@ class FactorGraph:
         self.max_factors = max_factors
         self.cross_view = cross_view and buffer.n_views > 1
         self.incremental = incremental
+        self.use_semantic_flow_init = use_semantic_flow_init
 
         # operator at 1/8 resolution
         ht = buffer.height // 8
@@ -142,7 +146,7 @@ class FactorGraph:
             ix = torch.arange(len(self.age))[torch.argsort(self.age).cpu()]
             self.rm_factors(ix >= self.max_factors - ii.shape[0], store=True)
 
-        pi, qi, _, pj, qj, _ = self.buffer.expand_edge_multiview(ii, jj)
+        pi, qi, di, pj, qj, dj = self.buffer.expand_edge_multiview(ii, jj)
 
         if self.incremental:
             # correlation volume for new edges (1, |E| V, 128, ht//8, wd//8)
@@ -156,6 +160,11 @@ class FactorGraph:
 
         with torch.cuda.amp.autocast(enabled=False):
             target, _ = self.buffer.reproject_dense_disp(ii, jj)
+
+            if self.use_semantic_flow_init and self.buffer.embeddings is not None:
+                photo_conf = torch.zeros(target.shape[:-1], device=target.device)
+                target = self._blend_semantic_flow(target, photo_conf, di, dj)
+
             target = target[None]
             weight = torch.zeros_like(target)
 
@@ -392,6 +401,56 @@ class FactorGraph:
                 optimize_rig_rotation=optimize_rig_rotation,
                 verbose=solver_verbose,
             )
+
+    def _blend_semantic_flow(
+        self,
+        target: torch.Tensor,
+        photo_conf: torch.Tensor,
+        di: torch.Tensor,
+        dj: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        For each edge, compute semantic flow and blend with the geometric prior.
+
+        Args:
+            target:     (N_edges, ht, wd, 2) geometric prior (absolute coords).
+            photo_conf: (N_edges, ht, wd) photometric confidence (0 at init).
+            di:         (N_edges,) source flattened view indices into embeddings.
+            dj:         (N_edges,) target flattened view indices into embeddings.
+
+        Returns:
+            blended: (N_edges, ht, wd, 2) blended target.
+        """
+        embeddings = self.buffer.flattened_embeddings  # (NV, C, H_emb, W_emb)
+        valid_mask = self.buffer.flattened_embedding_valid_mask  # (NV, H_emb, W_emb)
+        ht, wd = self.coords0.shape[0:2]
+        H_emb, W_emb = embeddings.shape[2], embeddings.shape[3]
+        need_resize = (H_emb != ht) or (W_emb != wd)
+
+        blended = target.clone()
+        for e in range(target.shape[0]):
+            src_idx, tgt_idx = di[e].item(), dj[e].item()
+            if not (valid_mask[src_idx].any() and valid_mask[tgt_idx].any()):
+                continue
+
+            Z_i = embeddings[src_idx]  # (C, H_emb, W_emb)
+            Z_j = embeddings[tgt_idx]
+
+            if need_resize:
+                Z_i = F.interpolate(
+                    Z_i.unsqueeze(0).float(), size=(ht, wd),
+                    mode="bilinear", align_corners=True,
+                ).squeeze(0)
+                Z_j = F.interpolate(
+                    Z_j.unsqueeze(0).float(), size=(ht, wd),
+                    mode="bilinear", align_corners=True,
+                ).squeeze(0)
+
+            omega_sem, sem_conf = semantic_flow_init(Z_i, Z_j, target[e])
+            blended[e] = blend_flow_prior(
+                target[e], omega_sem, photo_conf[e], sem_conf,
+            )
+        return blended
 
     def add_neighborhood_factors(self, t0, t1, r: int = 3):
         """

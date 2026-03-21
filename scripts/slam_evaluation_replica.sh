@@ -6,13 +6,13 @@ export RESULTS_FOLDER=$ROOT_DIR/vipe_results
 export CUDA_VISIBLE_DEVICES=1
 export SCENE_NAMES=(
     room0
-    # room1
-    # room2 
-    # office0
-    # office1
-    # office2
-    # office3
-    # office4
+    room1
+    room2 
+    office0
+    office1
+    office2
+    office3
+    office4
 )
 
 for SCENE_NAME in ${SCENE_NAMES[*]}

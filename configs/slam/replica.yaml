@@ -31,6 +31,8 @@ init_disp: 1.0
 optimize_intrinsics: ???
 # Whether to optimize rig
 optimize_rig_rotation: false
+use_semantic_flow_init: true
+
 # Whether add reproj factors for cross-views
 cross_view: true
 cross_view_idx: null  # null means default

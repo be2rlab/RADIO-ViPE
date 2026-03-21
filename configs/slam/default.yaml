@@ -45,6 +45,9 @@ visualize: false
 # Use keyframe depth for recovering metric depth
 keyframe_depth: metric3d-small
 
+# Use semantic (Radio) embeddings to initialise the correlation-volume flow prior
+use_semantic_flow_init: true
+
 ba:
   dense_disp_alpha: 0.001
   embedding_weight: 0.001
