@@ -183,3 +183,4 @@ tum_results
 **.png
 aria_results/
 **.pt
+experiments/*

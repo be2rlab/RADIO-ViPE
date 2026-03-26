@@ -6,8 +6,8 @@ instance: vipe.pipeline.default.DefaultAnnotationPipeline
 # Init configs
 init:
   camera_type: "pinhole"
-  intrinsics: "geocalib"
-  intrinsics_path: null
+  intrinsics: "file"
+  intrinsics_path: "/data/tum/cam_params.json"
   instance: null
     # kf_gap_sec: 2.0
     # phrases: 

@@ -24,7 +24,7 @@ slam:
   radseg_slide_crop: 224
   radseg_slide_stride: 160
   radseg_lang_align: False
-  pca_dim: 128
+  pca_dim: 256
 
 # Post-processing configs
 post:

@@ -308,11 +308,11 @@ class DenseDepthFlowTerm(SolverTerm):
                 )
         if self.embeddings is not None and self.use_semantic_kernel:
             if self.use_temporal_stability:
-                # STEP 1+2+3: compute temporal stability field and derive per-edge alpha
+                # compute temporal stability field and derive per-edge alpha
                 all_cs = self._compute_all_cosine_sims(coords, valid, self.device)
                 self.alpha = self._compute_temporal_alpha(all_cs)
             else:
-                # STEP 4: original pairwise sigmoid path (ablation fallback)
+                # original pairwise sigmoid path (ablation fallback)
                 emedding_redisdual, embedding_residual_weights = self.compute_embedding_residuals(
                     coords, valid, self.device
                 )

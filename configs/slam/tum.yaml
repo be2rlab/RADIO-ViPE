@@ -46,22 +46,24 @@ map_filter_thresh: 0.05
 visualize: false
 # Use keyframe depth for recovering metric depth
 keyframe_depth: metric3d-small
+use_semantic_flow_init: true
 
-sequence_name: 
+
+sequence_name: tum_rgbd
 
 ba:
   dense_disp_alpha: 0.001
-  embedding_weight: 0.01
-  # use_semantic_kernel: true
+  embedding_weight: 0.001
+  use_semantic_kernel: true
   # embedding_fine_iters: 4  # number of final BA iterations that include embedding term
   embedding_debug:
     enabled: false
-    log_every: 1
+    log_every: 10
     log_stats: true
     save_heatmaps: true
     samples_per_snapshot: 1
     max_snapshots: 100
-    output_dir: vipe_results/debug_embedding
+    output_dir: tum_results/debug_embedding
 
 sparse_tracks:
   name: dummy
