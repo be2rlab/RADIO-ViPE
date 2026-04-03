@@ -38,7 +38,7 @@ python run.py pipeline=default streams=raw_mp4_stream streams.base_path=YOUR_VID
 
 ## Acknowledgments
 
-ViPE is built on top of many great open-source research projects and codebases. Some of these include (not exhaustive):
+RADIO-ViPE is built on top of many great open-source research projects and codebases. Some of these include (not exhaustive):
 - [RAD-SEG](https://arxiv.org/abs/2511.19704)
 - [KM-ViPE](https://arxiv.org/abs/2512.01889)
 - [RayFronts](https://arxiv.org/abs/2504.06994)
