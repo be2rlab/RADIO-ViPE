@@ -1,16 +1,12 @@
-# KM-ViPE: Online Tightly Coupled Vision-Language-Geometry Fusion for Open-Vocabulary Semantic SLAM
+# RADIO-ViPE: Online Tightly Coupled Multi-Modal Fusion for Open-Vocabulary Semantic SLAM in Dynamic Environments
 
-**Contributors**: Be2R Lab (ITMO), SBER Robotics Center.
+**Contributors**:  Biomechatronics and Energy-Efficient Robotics (BE2R) Lab, ITMO University.
 
 ![alt text](assets/pipeline.jpg)
 
+**Full Abstract**: We present **RADIO-ViPE** (**R**educe **A**ll **D**omains **I**nto **O**ne --- **Vi**deo **P**ose **E**ngine), an online semantic SLAM system that enables geometry-aware open-vocabulary grounding, associating arbitrary natural language queries with localized 3D regions and objects in dynamic environments. Unlike existing approaches that require calibrated, posed RGB-D input, RADIO-ViPE operates directly on raw monocular RGB video streams, requiring no prior camera intrinsics, depth sensors, or pose initialization. The system tightly couples multi-modal embeddings — spanning vision and language — derived from agglomerative foundation models (e.g., RADIO) with geometric scene information. This vision-language-geometric fusion is optimized within adaptive robust kernels, designed to handle both actively moving objects and agent-displaced scene elements (e.g., furniture rearranged during ego-centric session). Experiments demonstrate that RADIO-ViPE achieves state-of-the-art results on the dynamic TUM-RGBD benchmark while maintaining competitive performance against offline open-vocabulary methods that rely on calibrated data and static scene assumptions. RADIO-ViPE bridges a critical gap in real-world deployment, enabling robust open-vocabulary semantic grounding for autonomous robotics, AR/VR applications, and unconstrained in-the-wild video streams.
 
-**Full Abstract**: We present KM-ViPE (**K**nowledge **M**apping **Vi**deo **P**ose **E**ngine), a real-time open-vocabulary SLAM framework for uncalibrated monocular cameras in dynamic environments. Unlike systems requiring depth sensors and offline calibration, KM-ViPE operates directly on raw RGB streams, making it ideal for ego-centric applications and harvesting internet-scale video data for training.
-KM-ViPE tightly couples DINO visual features with geometric constraints through a high-level features based adaptive robust kernel that handles both moving objects and movable static objects (e.g., moving furniture in ego-centric views). The system performs simultaneous online localization and open-vocabulary semantic mapping by fusing geometric and deep visual features aligned with language embeddings.
-Our results are competitive with state-of-the-art approaches, while existing solutions either operate offline, need depth data and/or odometry estimation, or lack dynamic scene robustness. KM-ViPE benefits from internet-scale training and uniquely combines online operation, uncalibrated monocular input, and robust handling of dynamic scenes, which makes it a good fit for autonomous robotics and AR/VR applications and advances practical spatial intelligence capabilities for embodied AI.
-
-
-**[Arxiv](https://arxiv.org/abs/2512.01889)**
+![Demo](assets/demo.gif)
 
 ## Installation
 ### Docker
@@ -37,32 +33,23 @@ python run.py pipeline=default streams=raw_mp4_stream streams.base_path=YOUR_VID
 python run.py pipeline=default streams=raw_mp4_stream streams.base_path=YOUR_VIDEO_OR_DIR_PATH pipeline.post.depth_align_model=null
 ```
 
+## Evaluation
+- Soon will be documented and updated.
 
 ## Acknowledgments
 
 ViPE is built on top of many great open-source research projects and codebases. Some of these include (not exhaustive):
+- [RAD-SEG](https://arxiv.org/abs/2511.19704)
+- [KM-ViPE](https://arxiv.org/abs/2512.01889)
+- [RayFronts](https://arxiv.org/abs/2504.06994)
 - [ViPE](https://github.com/nv-tlabs/vipe?tab=readme-ov-file)
+- [RADIO](https://arxiv.org/abs/2601.17237)
 - [DINOv3](https://github.com/facebookresearch/dinov3)
 - [Talk2DINO](https://github.com/lorebianchi98/Talk2DINO)
 - [RVWO](https://github.com/be2rlab/rvwo)
 - [UniDepth](https://github.com/lpiccinelli-eth/UniDepth)
 
 
-## Citation
-
-If you find KM-ViPE useful in your research or application, please consider citing the following paper:
-
-```
-@misc{nasser2025kmvipeonlinetightlycoupled,
-      title={KM-ViPE: Online Tightly Coupled Vision-Language-Geometry Fusion for Open-Vocabulary Semantic SLAM}, 
-      author={Zaid Nasser and Mikhail Iumanov and Tianhao Li and Maxim Popov and Jaafar Mahmoud and Malik Mohrat and Ilya Obrubov and Ekaterina Derevyanka and Ivan Sosin and Sergey Kolyubin},
-      year={2025},
-      eprint={2512.01889},
-      archivePrefix={arXiv},
-      primaryClass={cs.CV},
-      url={https://arxiv.org/abs/2512.01889}, 
-}
-```
 
 ## License
 

@@ -45,6 +45,9 @@ visualize: false
 # Use keyframe depth for recovering metric depth
 keyframe_depth: metric3d-small
 
+# Use semantic (Radio) embeddings to initialise the correlation-volume flow prior
+use_semantic_flow_init: true
+
 ba:
   dense_disp_alpha: 0.001
   embedding_weight: 0.001
@@ -58,6 +61,40 @@ ba:
     samples_per_snapshot: 1
     max_snapshots: 100
     output_dir: vipe_results/debug_embedding
+
+# Initialize keyframe disparity from monocular depth prior instead of propagating mean
+use_depth_prior_init: true
+
+# Adaptive frontend GRU iterations: run more in hard cases, stop early when converged
+adaptive_frontend_iters:
+  enabled: false
+  # Phase 1 (after adding proximity factors): min/max GRU+BA iterations
+  min_iters1: 2
+  max_iters1: 8
+  # Phase 2 (refinement after keyframe decision): min/max GRU+BA iterations
+  min_iters2: 1
+  max_iters2: 4
+  # Mean flow-delta norm (pixels at 1/8 res) below which we declare convergence
+  convergence_thresh: 0.025
+
+# Weight proximity edges by embedding cosine similarity to prefer visually-overlapping pairs
+embedding_covisibility:
+  enabled: true
+  # Additive penalty to frame distance for dissimilar frames (cosine distance scaled by weight)
+  weight: 5.0
+
+loop_closure:
+  enabled: true
+  # Cosine similarity threshold for declaring a loop closure
+  similarity_thresh: 0.85
+  # Minimum keyframe gap to prevent trivial matches with recent frames
+  min_interval: 20
+  # Maximum number of loop closure candidates per keyframe
+  max_candidates: 3
+  # Number of pose-only BA steps before full BA when loops are detected
+  pose_graph_steps: 2
+  # Number of BA iterations per pose-graph step
+  pose_graph_iters: 4
 
 sparse_tracks:
   name: dummy

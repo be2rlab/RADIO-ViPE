@@ -14,6 +14,7 @@
 # limitations under the License.
 
 
+import json
 import logging
 
 from pathlib import Path
@@ -106,6 +107,130 @@ class GeoCalibIntrinsicsProcessor(IntrinsicEstimationProcessor):
         if not is_pinhole:
             # Assign distortion parameter
             self.distortion = [res["camera"].dist[0, 0].item()]
+
+
+class FileIntrinsicsProcessor(IntrinsicEstimationProcessor):
+    """Load intrinsics from a saved artifact file."""
+
+    def __init__(
+        self,
+        video_stream: VideoStream,
+        intrinsics_path: str | Path,
+        camera_type: CameraType = CameraType.PINHOLE,
+    ) -> None:
+        super().__init__(video_stream)
+        self.camera_type = camera_type
+        self.shared_intrinsics: torch.Tensor | None = None
+        self.intrinsics_by_frame: dict[int, torch.Tensor] = {}
+
+        intrinsics_path = Path(intrinsics_path)
+        assert intrinsics_path.exists(), f"Intrinsics file does not exist: {intrinsics_path}"
+
+        intrinsics_data, frame_inds = self._load_intrinsics_file(intrinsics_path)
+
+        if intrinsics_data.ndim == 1:
+            intrinsics_data = intrinsics_data[None]
+            frame_inds = np.array([0])
+
+        expected_dim = camera_type.intrinsics_dim()
+        assert intrinsics_data.shape[-1] == expected_dim, (
+            f"Expected intrinsics dimension {expected_dim} for {camera_type.name}, "
+            f"got {intrinsics_data.shape[-1]} from {intrinsics_path}"
+        )
+
+        if intrinsics_data.shape[0] == 1:
+            self.shared_intrinsics = intrinsics_data[0]
+            return
+
+        self.intrinsics_by_frame = {
+            int(frame_idx): intrinsics_data[row_idx] for row_idx, frame_idx in enumerate(frame_inds.tolist())
+        }
+        expected_frame_inds = set(range(len(video_stream)))
+        if set(self.intrinsics_by_frame) != expected_frame_inds:
+            raise ValueError(
+                f"{intrinsics_path} must contain either a single intrinsics row or entries for every frame "
+                f"in the stream (expected indices 0..{len(video_stream) - 1})"
+            )
+
+    def __call__(self, frame_idx: int, frame: VideoFrame) -> VideoFrame:
+        intrinsics = self.shared_intrinsics
+        if intrinsics is None:
+            intrinsics = self.intrinsics_by_frame.get(frame_idx)
+        assert intrinsics is not None, f"Missing intrinsics for frame {frame_idx}"
+        frame.intrinsics = intrinsics.clone()
+        frame.camera_type = self.camera_type
+        return frame
+
+    @staticmethod
+    def _load_intrinsics_file(intrinsics_path: Path) -> tuple[torch.Tensor, np.ndarray]:
+        suffix = intrinsics_path.suffix.lower()
+
+        if suffix == ".npz":
+            with np.load(intrinsics_path) as data:
+                intrinsics_data = torch.from_numpy(data["data"]).float()
+                frame_inds = np.asarray(data["inds"]) if "inds" in data.files else np.arange(intrinsics_data.shape[0])
+            return intrinsics_data, frame_inds
+
+        if suffix == ".txt":
+            return FileIntrinsicsProcessor._load_intrinsics_txt(intrinsics_path)
+
+        if suffix == ".json":
+            return FileIntrinsicsProcessor._load_intrinsics_json(intrinsics_path)
+
+        raise ValueError(f"Unsupported intrinsics file format: {intrinsics_path.suffix}")
+
+    @staticmethod
+    def _load_intrinsics_txt(intrinsics_path: Path) -> tuple[torch.Tensor, np.ndarray]:
+        rows: list[list[float]] = []
+        frame_inds: list[int] = []
+
+        for line_idx, raw_line in enumerate(intrinsics_path.read_text().splitlines(), start=1):
+            line = raw_line.split("#", 1)[0].strip()
+            if not line:
+                continue
+
+            if ":" in line:
+                frame_prefix, values_str = line.split(":", 1)
+                try:
+                    frame_idx = int(frame_prefix.strip())
+                except ValueError as exc:
+                    raise ValueError(
+                        f"Invalid frame index on line {line_idx} in {intrinsics_path}: {frame_prefix!r}"
+                    ) from exc
+            else:
+                frame_idx = len(frame_inds)
+                values_str = line
+
+            values = [float(value) for value in values_str.replace(",", " ").split()]
+            rows.append(values)
+            frame_inds.append(frame_idx)
+
+        if not rows:
+            raise ValueError(f"No intrinsics found in {intrinsics_path}")
+
+        row_lengths = {len(row) for row in rows}
+        if len(row_lengths) != 1:
+            raise ValueError(f"Inconsistent intrinsics dimensions in {intrinsics_path}")
+
+        return torch.tensor(rows, dtype=torch.float32), np.asarray(frame_inds)
+
+    @staticmethod
+    def _load_intrinsics_json(intrinsics_path: Path) -> tuple[torch.Tensor, np.ndarray]:
+        payload = json.loads(intrinsics_path.read_text())
+        camera = payload.get("camera", payload)
+
+        required_keys = ("fx", "fy", "cx", "cy")
+        missing_keys = [key for key in required_keys if key not in camera]
+        if missing_keys:
+            raise ValueError(
+                f"Missing required intrinsics keys in {intrinsics_path}: {', '.join(missing_keys)}"
+            )
+
+        row = [float(camera[key]) for key in required_keys]
+        if "k1" in camera:
+            row.append(float(camera["k1"]))
+
+        return torch.tensor([row], dtype=torch.float32), np.asarray([0])
 
 
 class TrackAnythingProcessor(StreamProcessor):

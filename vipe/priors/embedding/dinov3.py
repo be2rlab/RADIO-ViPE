@@ -514,7 +514,7 @@ class DINOv3EmbeddingEngine:
             return stats
         return {"message": "CUDA not available"}
 
-    def embed_frame_multiscale(
+    def _extract_dino_features_multiscale(
         self,
         image: Union[Image.Image, Tensor],
         scales: Optional[List[float]] = None,
@@ -581,7 +581,7 @@ class DINOv3EmbeddingEngine:
             if not isinstance(features, list):
                 raise ValueError(
                     f"Method '{method}' requires 'features' to be a List[Tensor]. "
-                    "Use embed_frame_multiscale() to generate it."
+                    "Use _extract_dino_features_multiscale() to generate it."
                 )
 
             # Set the blend mode on the upsampler instance
@@ -681,7 +681,7 @@ def demo_usage():
             # This returns a list of Tensors [H_i, W_i, D]
             print("Extracting multi-scale features...")
             t_start_multi = time.time()
-            features_pyramid = tracker.embed_frame_multiscale(test_image)
+            features_pyramid = tracker._extract_radseg_features_multiscale(test_image)
             t_end_multi = time.time()
             print(f"Multi-scale extraction done in {t_end_multi - t_start_multi:.3f}s")
 

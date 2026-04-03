@@ -1,3 +1,3 @@
-[submodule "dino/dinov3"]
-	path = dino/dinov3
-	url = https://github.com/facebookresearch/dinov3
+# [submodule "dino/dinov3"]
+# 	path = dino/dinov3
+# 	url = https://github.com/facebookresearch/dinov3

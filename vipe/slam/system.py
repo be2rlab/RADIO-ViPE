@@ -41,6 +41,7 @@ from .components.backend import SLAMBackend
 from .components.buffer import GraphBuffer
 from .components.frontend import SLAMFrontend
 from .components.inner_filler import FilledReturn, InnerFiller
+from .components.loop_closure import LoopClosureDetector
 from .components.motion_filter import MotionFilter
 from .components.sparse_tracks import build_sparse_tracks
 from .interface import SLAMOutput
@@ -148,24 +149,37 @@ class SLAMSystem:
             print(f"Using depth model: {self.metric_depth.depth_type}")
         else:
             print("No depth model used!!!!")
-        model_family: DinoBackboneFamily = DinoBackboneFamily.DINOV2
-        model_variant: str | DinoV3Variant | DinoV2Variant = DinoV2Variant.VITB_REG
+        # model_family: DinoBackboneFamily = DinoBackboneFamily.DINOV2
+        # model_variant: str | DinoV3Variant | DinoV2Variant = DinoV2Variant.VITB_REG
         weights_dir = "/home/user/km-vipe/weights/dinov2"
-        # weights_dir = None
-        # if model_variant == DinoV3Variant:
-        #     weights_dir = "/home/user/km-vipe/weights/dinov3"
-        # elif model_variant == DinoV2Variant:
-        #     weights_dir = "/home/user/km-vipe/weights/dinov2"
-        # else:
-        #     print("Not clear model Variant!!!")
-        self.pca_state_path = Path("/home/user/km-vipe/vipe_results/vipe/pca_basis.pt")
+        self.pca_state_path = Path(f"/home/user/km-vipe/vipe_results/vipe/{self.config.sequence_name}_pca_basis.pt")
         self._pca_state_saved = False
+        print(f"model_family: {self.config.model_family}, model_variant: {self.config.model_variant}")
         self.embedder = EmbeddingsPipeline(
-            model_family=model_family,
-            model_variant=model_variant,
-            weights_dir=weights_dir,
+            model_family = self.config.model_family,
+            model_variant = self.config.model_variant,
+            weights_dir = weights_dir,
+            pca_dim = self.config.pca_dim,
+            radseg_lang_model = self.config.radseg_lang_model,
+            radseg_lang_align = self.config.radseg_lang_align,
+            radseg_slide_crop = self.config.radseg_slide_crop,
+            radseg_slide_stride = self.config.radseg_slide_stride, 
         )
         self.embedded_keyframes = set()
+
+        lc_cfg = getattr(self.config, "loop_closure", None)
+        if lc_cfg is not None and getattr(lc_cfg, "enabled", False):
+            self.loop_closure = LoopClosureDetector(
+                similarity_thresh=float(getattr(lc_cfg, "similarity_thresh", 0.85)),
+                min_interval=int(getattr(lc_cfg, "min_interval", 20)),
+                max_candidates=int(getattr(lc_cfg, "max_candidates", 3)),
+                device=self.device,
+            )
+            self.backend.loop_closure = self.loop_closure
+            self.frontend.loop_closure = self.loop_closure
+        else:
+            self.loop_closure = None
+    
 
     def _maybe_save_pca_state(self) -> None:
         if self._pca_state_saved or self.pca_state_path is None:
@@ -224,25 +238,32 @@ class SLAMSystem:
                 self.buffer.poses[kf_idx] = (SE3(self.buffer.rig[view_idx]) * frame_data.pose.inv()).data
 
             if self.embedder is not None and kf_idx not in self.embedded_keyframes:
-                # print(f"[EMBEDDER] Running on keyframe_idx={kf_idx}, frame_idx={frame_idx}")
-                frame_data.features, frame_data.features_patch_size = self.embedder.process_frame(frame_data)
-                # self._maybe_save_pca_state()
-                self.embedded_keyframes.add(kf_idx)
+                features_list, frame_idx_list, view_idx_list= self.embedder.process_frame(frame_data,kf_idx,view_idx)
+                if features_list is not None:
+                    self._maybe_save_pca_state()
+                    for features, frame_idx, view_idx in zip(features_list, frame_idx_list, view_idx_list):
+                        self.embedded_keyframes.add(frame_idx)
+                        features = features.permute(2, 0, 1).to(self.device, dtype=torch.float32)
+                        self.buffer.set_embeddings(frame_idx, view_idx, features)
 
-            if frame_data.features is not None:
-                features = frame_data.features.permute(2, 0, 1).to(self.device, dtype=torch.float32)
-                resized_features = F.interpolate(
-                    features.unsqueeze(0),
-                    size=(self.buffer.height // 8, self.buffer.width // 8),
-                    mode="bilinear",
-                    align_corners=False,
-                ).squeeze(0)
-                self.buffer.set_embeddings(kf_idx, view_idx, resized_features)
-            else:
-                self.buffer.set_embeddings(kf_idx, view_idx, None)
 
         if phase == 1:
             self.buffer.update_disps_sens(self.metric_depth, frame_idx=kf_idx)
+
+            if getattr(self.config, "use_depth_prior_init", True):
+                for v in range(self.buffer.n_views):
+                    sens = self.buffer.disps_sens[kf_idx, v]
+                    if sens.sum() > 0:
+                        self.buffer.disps[kf_idx, v] = sens
+
+        if (
+            self.loop_closure is not None
+            and self.buffer.embeddings is not None
+            and self.buffer.embedding_valid_mask is not None
+            and self.buffer.embedding_valid_mask[kf_idx].any()
+        ):
+            self.loop_closure.add_keyframe(kf_idx, self.buffer.embeddings[kf_idx])
+
         self.buffer.n_frames += 1
 
     @profile_function()

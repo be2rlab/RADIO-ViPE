@@ -1,17 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# vipe/slam/ba/terms.py
 
 import logging
 
@@ -136,7 +123,14 @@ class DenseDepthFlowTerm(SolverTerm):
         residual_scale: float = 1.0,
         use_photometric_residual: bool = False,
         debug_options: dict[str, Any] | None = None,
-        use_semantic_kernel: bool= False
+        use_semantic_kernel: bool = False,
+        # --- Temporal stability kernel (Steps 1-4) ---
+        use_temporal_stability: bool = True,
+        thresh_static: float = 0.75,
+        thresh_movable: float = 0.35,
+        alpha_static: float = 2.0,
+        alpha_huber: float = 1.0,
+        alpha_dynamic: float = -2.0,
     ) -> None:
         super().__init__()
 
@@ -149,6 +143,15 @@ class DenseDepthFlowTerm(SolverTerm):
         assert dense_disp_j_inds.shape == (self.n_terms,)
 
         self.use_semantic_kernel = use_semantic_kernel
+        self.use_temporal_stability = use_temporal_stability
+        self.thresh_static = thresh_static
+        self.thresh_movable = thresh_movable
+        self.alpha_static = alpha_static
+        self.alpha_huber = alpha_huber
+        self.alpha_dynamic = alpha_dynamic
+        # frame_idx -> (H*W,) stability field, populated during forward
+        self._stability_fields: dict[int, torch.Tensor] = {}
+
         self.pose_i_inds = pose_i_inds
         self.pose_j_inds = pose_j_inds
         self.rig_i_inds = rig_i_inds
@@ -174,8 +177,6 @@ class DenseDepthFlowTerm(SolverTerm):
         self.embeddings = embeddings
         if embeddings is not None:
             assert embeddings.dim() == 4, "Embeddings must be shaped (N_views, C, H, W)"
-            self.embeddings = embeddings.float()
-            self.embeddings_norm = F.normalize(self.embeddings, dim=1, eps=1e-8)
 
             self.embedding_valid_mask = embedding_valid_mask
             if embedding_valid_mask is not None:
@@ -210,6 +211,7 @@ class DenseDepthFlowTerm(SolverTerm):
             self._forward_calls = 0
             self._debug_saved = 0
             self._active = True
+            self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     def group_names(self) -> set[str]:
         names = {"pose", "dense_disp"}
@@ -305,9 +307,17 @@ class DenseDepthFlowTerm(SolverTerm):
                     data=torch.cat([Jri, Jrj], dim=0),
                 )
         if self.embeddings is not None and self.use_semantic_kernel:
-            emedding_redisdual, embedding_residual_weights = self.compute_embedding_residuals(coords,valid,'cuda:0')
-            emedding_redisdual = 1- emedding_redisdual
-            self.calculate_alpha(emedding_redisdual,embedding_residual_weights)
+            if self.use_temporal_stability:
+                # compute temporal stability field and derive per-edge alpha
+                all_cs = self._compute_all_cosine_sims(coords, valid, self.device)
+                self.alpha = self._compute_temporal_alpha(all_cs)
+            else:
+                # original pairwise sigmoid path (ablation fallback)
+                emedding_redisdual, embedding_residual_weights = self.compute_embedding_residuals(
+                    coords, valid, self.device
+                )
+                emedding_redisdual = 1 - emedding_redisdual
+                self.calculate_alpha(emedding_redisdual, embedding_residual_weights)
             self.alpha = torch.repeat_interleave(self.alpha, 2, dim=1)
         return ConcreteTermEvalReturn(
             J=J_dict,
@@ -340,10 +350,11 @@ class DenseDepthFlowTerm(SolverTerm):
             tgt_idx = self.dense_disp_j_inds[cs]
 
             # Normalized source (no sampling)
-            source_norm = self.embeddings_norm[src_idx]  # (N, C, H, W)
+            source_raw = self.embeddings[src_idx].float() # (N, C, H, W)
+            source_norm = F.normalize(source_raw, dim=1, eps=1e-8)  
 
             # Target: raw features (will be normalized AFTER sampling)
-            target_raw_full = self.embeddings[tgt_idx]  # (N, C, H, W)
+            target_raw_full = self.embeddings[tgt_idx].float()   # (N, C, H, W)
 
             coords_chunk = coords[cs]  # (N, H, W, 2)
             valid_chunk = valid[cs]  # (N, H, W, 1)
@@ -406,6 +417,241 @@ class DenseDepthFlowTerm(SolverTerm):
     #         x = embedding_residual
     #         self.alpha = (alpha_max - alpha_min) / (1 + torch.exp(-(x - 0.5) / 0.1)) + alpha_min
 
+    # ------------------------------------------------------------------
+    # STEP 1: temporal stability field helpers
+    # ------------------------------------------------------------------
+
+    def _compute_all_cosine_sims(
+        self,
+        coords: torch.Tensor,
+        valid: torch.Tensor,
+        device: str,
+    ) -> torch.Tensor:
+        """
+        Compute cosine similarity cs_ij(u) for every edge, returning
+        a (n_terms, H*W) tensor.  Valid pixels carry their true similarity;
+        invalid pixels are zeroed out.
+        """
+        coords = coords.view(self.n_terms, self.height, self.width, 2)
+        valid = valid.view(self.n_terms, self.height, self.width, 1)
+        pixel_count = self.height * self.width
+        dtype = coords.dtype
+        all_cs = torch.zeros(self.n_terms, pixel_count, device=device, dtype=dtype)
+
+        for chunk_start in range(0, self.n_terms, self.chunk_size):
+            chunk_end = min(chunk_start + self.chunk_size, self.n_terms)
+            cs = slice(chunk_start, chunk_end)
+
+            src_idx = self.dense_disp_i_inds[cs]
+            tgt_idx = self.dense_disp_j_inds[cs]
+
+            source_raw = self.embeddings[src_idx].float()
+            source_norm = F.normalize(source_raw, dim=1, eps=1e-8)
+            target_raw_full = self.embeddings[tgt_idx].float()
+
+            coords_chunk = coords[cs]
+            valid_chunk = valid[cs]
+
+            if self.embedding_valid_mask is not None:
+                src_valid = self.embedding_valid_mask[src_idx].unsqueeze(-1)
+                tgt_valid = self.embedding_valid_mask[tgt_idx].unsqueeze(-1)
+                valid_chunk = valid_chunk * src_valid * tgt_valid
+
+            valid_map = valid_chunk.permute(0, 3, 1, 2)  # (N, 1, H, W)
+
+            if not torch.any(valid_map.view(-1, pixel_count).sum(dim=1) > 0.0):
+                continue
+
+            target_raw_sampled, _, _ = self.bilinear_sample_with_grad(
+                target_raw_full, coords_chunk, return_grad=False
+            )
+
+            u = target_raw_sampled
+            u_norm = u.norm(dim=1, keepdim=True).clamp_min(1e-8)
+            t_norm = u / u_norm
+            cos_sim = (source_norm * t_norm).sum(dim=1)  # (N, H, W)
+            cos_sim = cos_sim * valid_map.squeeze(1)
+
+            all_cs[cs] = cos_sim.view(-1, pixel_count)
+
+        return all_cs
+
+    def _compute_stability_fields(self, all_cs: torch.Tensor) -> None:
+        """
+        STEP 1: Build per-frame temporal stability S_i(u) from all pairwise
+        cosine similarities and store in self._stability_fields.
+
+        For each source keyframe i, gather cs_ij across all edges (i,*) and
+        compute:
+            mean_cs_i  = mean over j in N(i) of cs_ij(u)
+            var_cs_i   = variance over j in N(i) of cs_ij(u)
+            S_i(u)     = mean_cs_i(u) * (1 - var_cs_i(u))   clamped to [0, 1]
+
+        High S  → consistently similar across views → genuinely static.
+        Low mean or high variance → moving or unreliably textured.
+        """
+        self._stability_fields = {}
+        unique_frames = self.dense_disp_i_inds.unique()
+        for frame_idx in unique_frames:
+            fidx = int(frame_idx.item())
+            mask = self.dense_disp_i_inds == frame_idx
+            cs_for_frame = all_cs[mask]  # (n_neighbors, H*W)
+            if cs_for_frame.shape[0] == 1:
+                S = cs_for_frame[0].clamp(0.0, 1.0)
+            else:
+                mean_cs = cs_for_frame.mean(dim=0)
+                var_cs = cs_for_frame.var(dim=0, unbiased=False)
+                S = (mean_cs * (1.0 - var_cs)).clamp(0.0, 1.0)
+            self._stability_fields[fidx] = S
+
+    # ------------------------------------------------------------------
+    # STEP 2: three-regime differentiable alpha mapping
+    # ------------------------------------------------------------------
+
+    def _stability_to_alpha(self, S: torch.Tensor) -> torch.Tensor:
+        """
+        Map a stability field S (any shape, values in [0, 1]) to Barron
+        alpha values using piecewise linear interpolation via torch.lerp so
+        the mapping is differentiable everywhere.
+
+        Three regimes:
+            S in [0,            thresh_movable]  → alpha_dynamic
+            S in [thresh_movable, thresh_static] → lerp through alpha_huber
+            S in [thresh_static, 1]              → alpha_static
+
+        The [thresh_movable, thresh_static] span is split at its midpoint so
+        that alpha_huber is reached at the centre, giving a smooth S-curve
+        through all three anchor values.
+        """
+        t_lo = self.thresh_movable
+        t_hi = self.thresh_static
+        t_mid = (t_lo + t_hi) * 0.5
+
+        a_lo = self.alpha_dynamic
+        a_mid = self.alpha_huber
+        a_hi = self.alpha_static
+
+        # Lower half: S in [t_lo, t_mid] → a_lo to a_mid
+        t_lower = ((S - t_lo) / max(t_mid - t_lo, 1e-6)).clamp(0.0, 1.0)
+        # Upper half: S in [t_mid, t_hi] → a_mid to a_hi
+        t_upper = ((S - t_mid) / max(t_hi - t_mid, 1e-6)).clamp(0.0, 1.0)
+
+        alpha = torch.lerp(
+            torch.full_like(S, a_lo),
+            torch.full_like(S, a_mid),
+            t_lower,
+        )
+        alpha = torch.lerp(alpha, torch.full_like(S, a_hi), t_upper)
+        return alpha
+
+    # ------------------------------------------------------------------
+    # STEP 3: edge alpha = min(S_i, S_j)
+    # ------------------------------------------------------------------
+
+    def _compute_temporal_alpha(self, all_cs: torch.Tensor) -> torch.Tensor:
+        """
+        STEP 3: For edge (i, j) the per-pixel kernel strength is governed by
+        the *less stable* of the two endpoints:
+
+            S_edge(u) = min(S_i(u), S_j(u))
+            alpha_edge(u) = _stability_to_alpha(S_edge(u))
+
+        This prevents a moving object from receiving L2 treatment merely
+        because it happens to look stable in one view.
+
+        Frames that never appear as a source in the edge list receive a
+        neutral default stability of 0.5 (maps to roughly alpha_huber).
+        """
+        self._compute_stability_fields(all_cs)
+        device = all_cs.device
+        dtype = all_cs.dtype
+        pixel_count = self.height * self.width
+        S_DEFAULT = 0.5  # neutral: maps to ~alpha_huber at centre of range
+
+        # Build a dense lookup table indexed by frame id
+        all_frame_ids = torch.cat([self.dense_disp_i_inds, self.dense_disp_j_inds])
+        max_frame_id = int(all_frame_ids.max().item()) + 1
+
+        S_table = torch.full(
+            (max_frame_id, pixel_count), S_DEFAULT, device=device, dtype=dtype
+        )
+        for fidx, S in self._stability_fields.items():
+            S_table[fidx] = S.to(device=device, dtype=dtype)
+
+        S_i = S_table[self.dense_disp_i_inds]  # (n_terms, H*W)
+        S_j = S_table[self.dense_disp_j_inds]  # (n_terms, H*W)
+        S_edge = torch.minimum(S_i, S_j)
+
+        return self._stability_to_alpha(S_edge)
+
+    # ------------------------------------------------------------------
+    # STEP 5: visualisation helper
+    # ------------------------------------------------------------------
+
+    def visualize_stability(
+        self,
+        keyframe_id: int,
+        logger: Any = None,
+        log_key: str | None = None,
+        step: int | None = None,
+    ) -> "np.ndarray":
+        """
+        Return the temporal stability field S_i(u) for *keyframe_id* as a
+        uint8 RGB heatmap (jet colormap, values clipped to [0, 1]).
+
+        Args:
+            keyframe_id: index into self._stability_fields.
+            logger:      optional wandb run or SummaryWriter.  When provided
+                         the heatmap is also logged.
+            log_key:     tag for the logger (defaults to
+                         ``"stability/frame_{keyframe_id}"``).
+            step:        global step for tensorboard / wandb logging.
+
+        Returns:
+            heatmap as (H, W, 3) uint8 numpy array.
+
+        Raises:
+            KeyError: if keyframe_id has no stability field yet (call
+                      forward() first).
+        """
+        import cv2
+        import numpy as np
+
+        if keyframe_id not in self._stability_fields:
+            raise KeyError(
+                f"No stability field for keyframe {keyframe_id}. "
+                "Run forward() to populate self._stability_fields first."
+            )
+
+        S = self._stability_fields[keyframe_id].detach().cpu().float()
+        S_2d = S.view(self.height, self.width).numpy()
+        S_clipped = np.clip(S_2d, 0.0, 1.0)
+
+        img_u8 = (S_clipped * 255.0).astype(np.uint8)
+        heatmap_bgr = cv2.applyColorMap(img_u8, cv2.COLORMAP_JET)
+        heatmap_rgb = cv2.cvtColor(heatmap_bgr, cv2.COLOR_BGR2RGB)
+
+        if logger is not None:
+            tag = log_key or f"stability/frame_{keyframe_id}"
+            # SummaryWriter (TensorBoard)
+            if hasattr(logger, "add_image"):
+                img_chw = np.transpose(heatmap_rgb, (2, 0, 1))  # (3, H, W)
+                kwargs = {} if step is None else {"global_step": step}
+                logger.add_image(tag, img_chw, **kwargs)
+            # wandb
+            elif hasattr(logger, "log"):
+                try:
+                    import wandb
+                    log_payload: dict[str, Any] = {tag: wandb.Image(heatmap_rgb)}
+                    if step is not None:
+                        log_payload["global_step"] = step
+                    logger.log(log_payload)
+                except ImportError:
+                    logging.getLogger(__name__).warning(
+                        "wandb not installed; skipping stability log."
+                    )
+
+        return heatmap_rgb
 
     def _prepare_embedding_weight(self, weight: torch.Tensor | float) -> tuple[torch.Tensor, bool]:
         device = self.embeddings.device
@@ -587,8 +833,7 @@ class EmbeddingSimilarityTerm(SolverTerm):
 
         # Store raw embeddings and a pre-normalized copy for the *source* (no sampling on source)
         assert embeddings.dim() == 4, "Embeddings must be shaped (N_views, C, H, W)"
-        self.embeddings = embeddings.float()
-        self.embeddings_norm = F.normalize(self.embeddings, dim=1, eps=1e-8)
+        self.embeddings = embeddings
 
         self.embedding_valid_mask = embedding_valid_mask
         if embedding_valid_mask is not None:
@@ -837,10 +1082,11 @@ class EmbeddingSimilarityTerm(SolverTerm):
             tgt_idx = self.dense_disp_j_inds[cs]
 
             # Normalized source (no sampling)
-            source_norm = self.embeddings_norm[src_idx]  # (N, C, H, W)
+            source_raw = self.embeddings[src_idx].float() # (N, C, H, W)
+            source_norm = F.normalize(source_raw, dim=1, eps=1e-8)  
 
             # Target: raw features (will be normalized AFTER sampling)
-            target_raw_full = self.embeddings[tgt_idx]  # (N, C, H, W)
+            target_raw_full = self.embeddings[tgt_idx].float()  # (N, C, H, W)
 
             coords_chunk = coords[cs]  # (N, H, W, 2)
             valid_chunk = valid[cs]  # (N, H, W, 1)

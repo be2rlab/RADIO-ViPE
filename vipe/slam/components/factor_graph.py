@@ -23,12 +23,14 @@ import warnings
 import numpy as np
 import rerun as rr
 import torch
+import torch.nn.functional as F
 
 from einops import rearrange
 
 from vipe.ext.lietorch import SE3
 
 from ..networks.droid_net import AltCorrBlock, CorrBlock, DroidNet
+from ..semantic_flow import blend_flow_prior, semantic_flow_init
 from .buffer import GraphBuffer
 
 
@@ -54,6 +56,8 @@ class FactorGraph:
         max_factors: int,
         incremental: bool,
         cross_view: bool,
+        use_semantic_flow_init: bool = False,
+        embedding_covisibility_weight: float = 0.0,
     ):
         self.net = net
         self.buffer = buffer
@@ -61,6 +65,8 @@ class FactorGraph:
         self.max_factors = max_factors
         self.cross_view = cross_view and buffer.n_views > 1
         self.incremental = incremental
+        self.use_semantic_flow_init = use_semantic_flow_init
+        self.embedding_covisibility_weight = embedding_covisibility_weight
 
         # operator at 1/8 resolution
         ht = buffer.height // 8
@@ -142,7 +148,7 @@ class FactorGraph:
             ix = torch.arange(len(self.age))[torch.argsort(self.age).cpu()]
             self.rm_factors(ix >= self.max_factors - ii.shape[0], store=True)
 
-        pi, qi, _, pj, qj, _ = self.buffer.expand_edge_multiview(ii, jj)
+        pi, qi, di, pj, qj, dj = self.buffer.expand_edge_multiview(ii, jj)
 
         if self.incremental:
             # correlation volume for new edges (1, |E| V, 128, ht//8, wd//8)
@@ -156,6 +162,11 @@ class FactorGraph:
 
         with torch.cuda.amp.autocast(enabled=False):
             target, _ = self.buffer.reproject_dense_disp(ii, jj)
+
+            if self.use_semantic_flow_init and self.buffer.embeddings is not None:
+                photo_conf = torch.zeros(target.shape[:-1], device=target.device)
+                target = self._blend_semantic_flow(target, photo_conf, di, dj)
+
             target = target[None]
             weight = torch.zeros_like(target)
 
@@ -237,8 +248,13 @@ class FactorGraph:
         motion_only: bool = False,
         fixed_motion: bool = False,
         limited_disp: bool = False,
-    ):
-        """run update operator on factor graph"""
+    ) -> float:
+        """run update operator on factor graph
+
+        Returns:
+            Mean L2 norm of the GRU flow delta (pixels). Useful for
+            adaptive iteration: small values indicate convergence.
+        """
         assert self.incremental
         assert self.corr is not None and self.inp is not None and self.f_net is not None
         assert not (motion_only and fixed_motion)
@@ -270,6 +286,8 @@ class FactorGraph:
             self.f_net, self.inp, corr, motn, ix=dix
         )
         weight[:, self.buffer.masks[pi, qi]] = 0.0
+
+        delta_norm = delta.norm(dim=-1).mean().item()
 
         with torch.cuda.amp.autocast(enabled=False):
             self.target = coords1 + delta.to(dtype=torch.float)
@@ -312,6 +330,7 @@ class FactorGraph:
             )
 
         self.age += 1
+        return delta_norm
 
     @torch.amp.autocast("cuda", enabled=False)
     def update_batch(
@@ -321,6 +340,7 @@ class FactorGraph:
         optimize_intrinsics: bool,
         optimize_rig_rotation: bool,
         solver_verbose: bool = False,
+        motion_only: bool = False,
     ):
         """
         Suitable for batch processing of the factor graph, when incremental=False.
@@ -329,6 +349,7 @@ class FactorGraph:
         Args:
             steps (int): number of steps for the update operator
             itrs (int): number of iterations for BA within each step
+            motion_only (bool): if True, fix disparity and only optimize poses
         """
         if self.incremental:
             warnings.warn("Calling update_batch with incremental=True could be slow.")
@@ -386,12 +407,84 @@ class FactorGraph:
                 n_iters=itrs,
                 pose_damping=1e-5,
                 pose_ep=1e-2,
-                motion_only=False,
+                motion_only=motion_only,
                 limited_disp=False,
-                optimize_intrinsics=optimize_intrinsics,
-                optimize_rig_rotation=optimize_rig_rotation,
+                optimize_intrinsics=optimize_intrinsics if not motion_only else False,
+                optimize_rig_rotation=optimize_rig_rotation if not motion_only else False,
                 verbose=solver_verbose,
             )
+
+    def _blend_semantic_flow(
+        self,
+        target: torch.Tensor,
+        photo_conf: torch.Tensor,
+        di: torch.Tensor,
+        dj: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        For each edge, compute semantic flow and blend with the geometric prior.
+
+        Vectorised validity checking, batched embedding resize, per-edge
+        correlation (memory-bounded), and vectorised blend.
+
+        Args:
+            target:     (N_edges, ht, wd, 2) geometric prior (absolute coords).
+            photo_conf: (N_edges, ht, wd) photometric confidence (0 at init).
+            di:         (N_edges,) source flattened view indices into embeddings.
+            dj:         (N_edges,) target flattened view indices into embeddings.
+
+        Returns:
+            blended: (N_edges, ht, wd, 2) blended target.
+        """
+        embeddings = self.buffer.flattened_embeddings  # (NV, C, H_emb, W_emb)
+        valid_mask = self.buffer.flattened_embedding_valid_mask  # (NV, H_emb, W_emb)
+        ht, wd = self.coords0.shape[0:2]
+        H_emb, W_emb = embeddings.shape[2], embeddings.shape[3]
+        need_resize = (H_emb != ht) or (W_emb != wd)
+
+        src_valid = valid_mask[di].flatten(1).any(dim=1)
+        tgt_valid = valid_mask[dj].flatten(1).any(dim=1)
+        edge_valid = src_valid & tgt_valid
+        valid_idx = torch.where(edge_valid)[0]
+
+        if len(valid_idx) == 0:
+            return target
+
+        di_v = di[valid_idx]
+        dj_v = dj[valid_idx]
+
+        Z_i = embeddings[di_v]
+        Z_j = embeddings[dj_v]
+        if need_resize:
+            stacked = torch.cat([Z_i, Z_j], dim=0).float()
+            stacked = F.interpolate(
+                stacked, size=(ht, wd), mode="bilinear", align_corners=True,
+            )
+            M = len(valid_idx)
+            Z_i, Z_j = stacked[:M], stacked[M:]
+        else:
+            Z_i = Z_i.float()
+            Z_j = Z_j.float()
+
+        target_v = target[valid_idx]
+        omega_sems = torch.empty_like(target_v)
+        sem_confs = torch.empty(
+            len(valid_idx), ht, wd, device=target.device, dtype=target.dtype
+        )
+        for k in range(len(valid_idx)):
+            omega_sems[k], sem_confs[k] = semantic_flow_init(
+                Z_i[k], Z_j[k], target_v[k]
+            )
+
+        beta = photo_conf[valid_idx] / (
+            photo_conf[valid_idx] + sem_confs + 1e-6
+        )
+        blended = target.clone()
+        blended[valid_idx] = (
+            beta.unsqueeze(-1) * target_v
+            + (1.0 - beta.unsqueeze(-1)) * omega_sems
+        )
+        return blended
 
     def add_neighborhood_factors(self, t0, t1, r: int = 3):
         """
@@ -407,6 +500,27 @@ class FactorGraph:
 
         keep = ((ii - jj).abs() > c) & ((ii - jj).abs() <= r)
         self.add_factors(ii[keep], jj[keep])
+
+    def _compute_frame_embedding_distance(
+        self, ii: torch.Tensor, jj: torch.Tensor
+    ) -> torch.Tensor | None:
+        """Cosine distance between mean-pooled frame embeddings for edge pairs."""
+        if self.buffer.embeddings is None or self.buffer.embedding_valid_mask is None:
+            return None
+
+        n = self.buffer.n_frames
+        valid = self.buffer.embedding_valid_mask[:n]  # (T, V, H, W)
+        frame_has_emb = valid.flatten(1).any(dim=1)  # (T,)
+
+        both_valid = frame_has_emb[ii] & frame_has_emb[jj]
+        if not both_valid.any():
+            return None
+
+        emb = self.buffer.embeddings[:n]  # (T, V, C, H, W)
+        descs = F.normalize(emb.float().mean(dim=[1, 3, 4]), dim=1, eps=1e-8)
+
+        sim = (descs[ii] * descs[jj]).sum(dim=1)
+        return torch.where(both_valid, 1.0 - sim, torch.zeros_like(sim))
 
     def add_proximity_factors(
         self,
@@ -439,6 +553,11 @@ class FactorGraph:
 
         d = self.buffer.frame_distance_dense_disp(ii, jj, beta=beta)
         d = d.mean(-1)
+
+        if self.embedding_covisibility_weight > 0:
+            d_emb = self._compute_frame_embedding_distance(ii, jj)
+            if d_emb is not None:
+                d = d + self.embedding_covisibility_weight * d_emb
 
         def _suppress(i: int, j: int):
             if (t0 <= i < t) and (t1 <= j < t):

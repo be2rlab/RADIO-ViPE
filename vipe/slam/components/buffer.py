@@ -1,23 +1,4 @@
-
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-# -------------------------------------------------------------------------------------------------
-# This file includes code originally from the DROID-SLAM repository:
-# https://github.com/cvg/DROID-SLAM
-# Licensed under the MIT License. See THIRD_PARTY_LICENSES.md for details.
-# -------------------------------------------------------------------------------------------------
+# vipe/slam/components/buffer.py
 
 import logging
 
@@ -92,13 +73,14 @@ class GraphBuffer:
         # timestamp (frame index)
         self.tstamp = torch.zeros(buffer_size, device=device, dtype=torch.int)
         # Original image (full resolution) RGB 0-1.
+        print(f'image size in buffer: {self.height}, {self.width}')
         self.images = torch.zeros(
             buffer_size,
             self.n_views,
             3,
             self.height,
             self.width,
-            device=device,
+            device='cpu',
             dtype=torch.float16,
         )
         self.dirty = torch.zeros(buffer_size, device=device, dtype=torch.bool)
@@ -239,7 +221,7 @@ class GraphBuffer:
                 height,
                 width,
                 device=self.device,
-                dtype=torch.float32,
+                dtype=torch.float16,
             )
             self.embedding_valid_mask = torch.zeros(
                 self.buffer_size,
@@ -260,12 +242,11 @@ class GraphBuffer:
             if self.embedding_valid_mask is not None:
                 self.embedding_valid_mask[frame_idx, view_idx] = False
             return
-
         embed_dim = embeddings.shape[0]
         height, width = embeddings.shape[1:]
         self._ensure_embedding_storage(embed_dim, height, width)
         assert self.embeddings is not None and self.embedding_valid_mask is not None
-        self.embeddings[frame_idx, view_idx] = embeddings.to(self.device, dtype=torch.float32)
+        self.embeddings[frame_idx, view_idx] = embeddings.to(self.device, dtype=torch.float16)
         self.embedding_valid_mask[frame_idx, view_idx] = True
 
     @property
@@ -330,7 +311,9 @@ class GraphBuffer:
         for frame_idx in frames_to_update:
             focal_length = self.intrinsics[0][0].item()
             depth_input = DepthEstimationInput(
-                rgb=self.images[frame_idx].moveaxis(1, -1).float(), focal_length=focal_length, index=frame_idx
+                # CHANGE:
+                # rgb=self.images[frame_idx].moveaxis(1, -1).float(), focal_length=focal_length, index=frame_idx
+                rgb=self.images[frame_idx].to(self.device).moveaxis(1, -1).float(), focal_length=focal_length, index=frame_idx
             )
             disp_sens = depth_model.estimate(depth_input).metric_depth
             disp_sens = disp_sens[:, 3::8, 3::8]
@@ -464,93 +447,41 @@ class GraphBuffer:
         This function is just an extraction from the factor_graph.
         They have to be coupled together to work.
         """
-        assert t0 <= t1
-        weight_dense_disp, weight_tracks = 0.001, 0.001
-        # weight_dense_disp, weight_tracks = 0.001, 0.0
-        # weight_dense_disp, weight_tracks = 0.0, 0.001
+        with torch.no_grad():
+            assert t0 <= t1
+            weight_dense_disp, weight_tracks = 0.001, 0.001
+            # weight_dense_disp, weight_tracks = 0.001, 0.0
+            # weight_dense_disp, weight_tracks = 0.0, 0.001
 
-        pi, qi, di, pj, qj, dj = self.expand_edge_multiview(ii, jj)
-        di_unique = torch.unique(di)
-        pi_unique = torch.unique(ii)  # Should be equivalent to unique(pi)
+            pi, qi, di, pj, qj, dj = self.expand_edge_multiview(ii, jj)
+            di_unique = torch.unique(di)
+            pi_unique = torch.unique(ii)  # Should be equivalent to unique(pi)
 
-        solver = Solver(compute_energy=verbose)
+            solver = Solver(compute_energy=verbose)
 
-        embedding_term_activation_iter = n_iters
-        embedding_term = None
-        embedding_weight = float(getattr(self.ba_config, "embedding_weight", 0.0))
-        use_semantic_kernel = bool(getattr(self.ba_config,"use_semantic_kernel",False))
-        embedding_weight_map: torch.Tensor | None = None
-        if self.embeddings is not None or use_semantic_kernel:
-            embedding_valid = self.flattened_embedding_valid_mask if self.embedding_valid_mask is not None else None
-            dense_h, dense_w = self.height // 8, self.width // 8
-            per_pixel_weight = rearrange(
-                weight.detach(),
-                "nv (h w) c -> nv h w c",
-                h=dense_h,
-                w=dense_w,
-                c=2,
-            ).mean(dim=-1)
-            embedding_weight_map = embedding_weight * per_pixel_weight
+            embedding_term_activation_iter = n_iters
+            embedding_term = None
+            embedding_weight = float(getattr(self.ba_config, "embedding_weight", 0.0))
+            use_semantic_kernel = bool(getattr(self.ba_config, "use_semantic_kernel", False))
+            use_temporal_stability = bool(getattr(self.ba_config, "use_temporal_stability", True))
+            thresh_static = float(getattr(self.ba_config, "thresh_static", 0.75))
+            thresh_movable = float(getattr(self.ba_config, "thresh_movable", 0.35))
+            alpha_static = float(getattr(self.ba_config, "alpha_static", 2.0))
+            alpha_huber = float(getattr(self.ba_config, "alpha_huber", 1.0))
+            alpha_dynamic = float(getattr(self.ba_config, "alpha_dynamic", -2.0))
+            embedding_weight_map: torch.Tensor | None = None
+            if self.embeddings is not None or use_semantic_kernel:
+                embedding_valid = self.flattened_embedding_valid_mask if self.embedding_valid_mask is not None else None
+                dense_h, dense_w = self.height // 8, self.width // 8
+                per_pixel_weight = rearrange(
+                    weight.detach(),
+                    "nv (h w) c -> nv h w c",
+                    h=dense_h,
+                    w=dense_w,
+                    c=2,
+                ).mean(dim=-1)
+                embedding_weight_map = embedding_weight * per_pixel_weight
 
-        solver.add_term(
-            DenseDepthFlowTerm(
-                pose_i_inds=pi,
-                pose_j_inds=pj,
-                rig_i_inds=qi,
-                rig_j_inds=qj,
-                dense_disp_i_inds=di,
-                dense_disp_j_inds=dj,
-                embeddings=self.flattened_embeddings if self.embeddings is not None else None,
-                embedding_valid_mask=embedding_valid if self.embeddings is not None else None,
-                embedding_weight=embedding_weight_map if self.embeddings is not None else None,
-                target=target,
-                weight=weight_dense_disp * weight,
-                debug_options=self.embedding_debug_options if self.embeddings is not None else None,
-                intrinsics=None,
-                intrinsics_factor=8.0,
-                rig=None,
-                image_size=(self.height // 8, self.width // 8),
-                camera_type=self.camera_type,
-                use_semantic_kernel = use_semantic_kernel,
-            ),AdaptiveBarronRobustKernel()
-        )
-
-        if self.embeddings is not None and embedding_weight > 0.0:
-            embedding_term = EmbeddingSimilarityTerm(
-                pose_i_inds=pi,
-                pose_j_inds=pj,
-                rig_i_inds=qi,
-                rig_j_inds=qj,
-                dense_disp_i_inds=di,
-                dense_disp_j_inds=dj,
-                embeddings=self.flattened_embeddings,
-                embedding_valid_mask=embedding_valid,
-                weight=embedding_weight_map,
-                intrinsics=None,
-                intrinsics_factor=8.0,
-                rig=None,
-                image_size=(self.height // 8, self.width // 8),
-                camera_type=self.camera_type,
-                debug_options=self.embedding_debug_options,
-            )
-            solver.add_term(embedding_term)
-            raw_fine_iters = getattr(self.ba_config, "embedding_fine_iters", None)
-            embedding_fine_iters_cfg = n_iters if raw_fine_iters in (None, "null") else int(raw_fine_iters)
-            embedding_fine_iters = n_iters if embedding_fine_iters_cfg <= 0 else min(embedding_fine_iters_cfg, n_iters)
-            embedding_term_activation_iter = max(0, n_iters - embedding_fine_iters)
-
-        if self.sparse_tracks.enabled:
-            # This does not support cross-view tracking yet.
-            sparse_target, sparse_weight = self.sparse_tracks.compute_dense_disp_target_weight(
-                source_view_inds=qi,
-                source_frame_inds=self.tstamp[pi],
-                target_view_inds=qj,
-                target_frame_inds=self.tstamp[pj],
-                image_size=(self.height, self.width),
-                dense_disp_size=(self.height // 8, self.width // 8),
-            )
-            sparse_target = sparse_target.flatten(1, 2)
-            sparse_weight = sparse_weight.flatten(1, 2)
             solver.add_term(
                 DenseDepthFlowTerm(
                     pose_i_inds=pi,
@@ -558,92 +489,157 @@ class GraphBuffer:
                     rig_i_inds=qi,
                     rig_j_inds=qj,
                     dense_disp_i_inds=di,
-                    target=sparse_target,
-                    weight=weight_tracks * sparse_weight,
+                    dense_disp_j_inds=dj,
+                    embeddings=self.flattened_embeddings if self.embeddings is not None else None,
+                    embedding_valid_mask=embedding_valid if self.embeddings is not None else None,
+                    embedding_weight=embedding_weight_map if self.embeddings is not None else None,
+                    target=target,
+                    weight=weight_dense_disp * weight,
+                    debug_options=self.embedding_debug_options if self.embeddings is not None else None,
                     intrinsics=None,
                     intrinsics_factor=8.0,
                     rig=None,
                     image_size=(self.height // 8, self.width // 8),
                     camera_type=self.camera_type,
-                )
+                    use_semantic_kernel=use_semantic_kernel,
+                    use_temporal_stability=use_temporal_stability,
+                    thresh_static=thresh_static,
+                    thresh_movable=thresh_movable,
+                    alpha_static=alpha_static,
+                    alpha_huber=alpha_huber,
+                    alpha_dynamic=alpha_dynamic,
+                ), AdaptiveBarronRobustKernel()
             )
 
-        # self.debug_visualize_target_weight(
-        #     target,
-        #     weight,
-        #     pi,
-        #     pj,
-        #     qi,
-        #     qj,
-        #     # other_target=sparse_target,
-        #     # other_weight=sparse_weight,
-        # )
+            if self.embeddings is not None and embedding_weight > 0.0:
+                embedding_term = EmbeddingSimilarityTerm(
+                    pose_i_inds=pi,
+                    pose_j_inds=pj,
+                    rig_i_inds=qi,
+                    rig_j_inds=qj,
+                    dense_disp_i_inds=di,
+                    dense_disp_j_inds=dj,
+                    embeddings=self.flattened_embeddings,
+                    embedding_valid_mask=embedding_valid,
+                    weight=embedding_weight_map,
+                    intrinsics=None,
+                    intrinsics_factor=8.0,
+                    rig=None,
+                    image_size=(self.height // 8, self.width // 8),
+                    camera_type=self.camera_type,
+                    debug_options=self.embedding_debug_options,
+                )
+                solver.add_term(embedding_term)
+                raw_fine_iters = getattr(self.ba_config, "embedding_fine_iters", None)
+                embedding_fine_iters_cfg = n_iters if raw_fine_iters in (None, "null") else int(raw_fine_iters)
+                embedding_fine_iters = n_iters if embedding_fine_iters_cfg <= 0 else min(embedding_fine_iters_cfg, n_iters)
+                embedding_term_activation_iter = max(0, n_iters - embedding_fine_iters)
 
-        solver.set_fixed(
-            "pose",
-            (torch.cat([pi_unique[pi_unique < t0], pi_unique[pi_unique >= t1]]) if t0 < t1 else None),
-        )
-        solver.set_retractor("pose", PoseRetractor())
-        solver.set_damping("pose", damping=pose_damping, ep=pose_ep)
-
-        if not motion_only:
-            disps_sens = rearrange(self.flattened_disps_sens, "nv h w -> nv (h w)")
-            sens_i_inds = di_unique[disps_sens[di_unique].sum(1) > 0.0]
-            if len(sens_i_inds) > 0:
+            if self.sparse_tracks.enabled:
+                # This does not support cross-view tracking yet.
+                sparse_target, sparse_weight = self.sparse_tracks.compute_dense_disp_target_weight(
+                    source_view_inds=qi,
+                    source_frame_inds=self.tstamp[pi],
+                    target_view_inds=qj,
+                    target_frame_inds=self.tstamp[pj],
+                    image_size=(self.height, self.width),
+                    dense_disp_size=(self.height // 8, self.width // 8),
+                )
+                sparse_target = sparse_target.flatten(1, 2)
+                sparse_weight = sparse_weight.flatten(1, 2)
                 solver.add_term(
-                    DispSensRegularizationTerm(
-                        i_inds=sens_i_inds,
-                        alpha=self.ba_config.dense_disp_alpha,
-                        disps_sens=disps_sens,
+                    DenseDepthFlowTerm(
+                        pose_i_inds=pi,
+                        pose_j_inds=pj,
+                        rig_i_inds=qi,
+                        rig_j_inds=qj,
+                        dense_disp_i_inds=di,
+                        target=sparse_target,
+                        weight=weight_tracks * sparse_weight,
+                        intrinsics=None,
+                        intrinsics_factor=8.0,
+                        rig=None,
+                        image_size=(self.height // 8, self.width // 8),
+                        camera_type=self.camera_type,
                     )
                 )
-            solver.set_retractor("dense_disp", DenseDispRetractor())
-            disp_damping = rearrange(disp_damping, "nv h w -> nv (h w)")
-            solver.set_damping(
-                "dense_disp",
-                damping=SparseBlockVector(
-                    inds=di_unique,
-                    data=0.2 * disp_damping[di_unique] + 1e-7,
-                ),
-                ep=1e-7,
+
+            # self.debug_visualize_target_weight(
+            #     target,
+            #     weight,
+            #     pi,
+            #     pj,
+            #     qi,
+            #     qj,
+            #     # other_target=sparse_target,
+            #     # other_weight=sparse_weight,
+            # )
+
+            solver.set_fixed(
+                "pose",
+                (torch.cat([pi_unique[pi_unique < t0], pi_unique[pi_unique >= t1]]) if t0 < t1 else None),
             )
-            if limited_disp:
-                solver.set_fixed("dense_disp", torch.cat([di[pi < t0], di[pi >= t1]]))
-        else:
-            solver.set_fixed("dense_disp")
-        solver.set_marginilized("dense_disp")
+            solver.set_retractor("pose", PoseRetractor())
+            solver.set_damping("pose", damping=pose_damping, ep=pose_ep)
 
-        solver.set_retractor("intrinsics", IntrinsicsRetractor(self.camera_type))
-        solver.set_damping("intrinsics", damping=1e-6, ep=1e-6)
-        if not optimize_intrinsics:
-            solver.set_fixed("intrinsics")
+            if not motion_only:
+                disps_sens = rearrange(self.flattened_disps_sens, "nv h w -> nv (h w)")
+                sens_i_inds = di_unique[disps_sens[di_unique].sum(1) > 0.0]
+                if len(sens_i_inds) > 0:
+                    solver.add_term(
+                        DispSensRegularizationTerm(
+                            i_inds=sens_i_inds,
+                            alpha=self.ba_config.dense_disp_alpha,
+                            disps_sens=disps_sens,
+                        )
+                    )
+                solver.set_retractor("dense_disp", DenseDispRetractor())
+                disp_damping = rearrange(disp_damping, "nv h w -> nv (h w)")
+                solver.set_damping(
+                    "dense_disp",
+                    damping=SparseBlockVector(
+                        inds=di_unique,
+                        data=0.2 * disp_damping[di_unique] + 1e-7,
+                    ),
+                    ep=1e-7,
+                )
+                if limited_disp:
+                    solver.set_fixed("dense_disp", torch.cat([di[pi < t0], di[pi >= t1]]))
+            else:
+                solver.set_fixed("dense_disp")
+            solver.set_marginilized("dense_disp")
 
-        solver.set_retractor("rig", RigRotationOnlyRetractor())
-        solver.set_damping("rig", damping=1e-4, ep=1e-4)
-        if not optimize_rig_rotation:
-            solver.set_fixed("rig")
-        else:
-            solver.set_fixed("rig", torch.zeros(1, device=self.device).long())
+            solver.set_retractor("intrinsics", IntrinsicsRetractor(self.camera_type))
+            solver.set_damping("intrinsics", damping=1e-6, ep=1e-6)
+            if not optimize_intrinsics:
+                solver.set_fixed("intrinsics")
 
-        disps_flattened = rearrange(self.flattened_disps, "nv h w -> nv (h w)")
+            solver.set_retractor("rig", RigRotationOnlyRetractor())
+            solver.set_damping("rig", damping=1e-4, ep=1e-4)
+            if not optimize_rig_rotation:
+                solver.set_fixed("rig")
+            else:
+                solver.set_fixed("rig", torch.zeros(1, device=self.device).long())
 
-        ba_energy = []
-        for iter_idx in range(n_iters):
-            if embedding_term is not None:
-                embedding_term.set_active(iter_idx >= embedding_term_activation_iter)
-            cur_energy = solver.run_inplace(
-                {
-                    "pose": SE3(self.poses),
-                    "dense_disp": disps_flattened,
-                    "intrinsics": self.intrinsics,
-                    "rig": SE3(self.rig),
-                }
-            )
-            ba_energy.append(cur_energy)
-            if verbose:
-                logger.info(f"BA iters = {n_iters}, energy: {ba_energy[0]} -> {ba_energy[-1]}")
+            disps_flattened = rearrange(self.flattened_disps, "nv h w -> nv (h w)")
 
-        self.disps.clamp_(min=0.001)
+            ba_energy = []
+            for iter_idx in range(n_iters):
+                if embedding_term is not None:
+                    embedding_term.set_active(iter_idx >= embedding_term_activation_iter)
+                cur_energy = solver.run_inplace(
+                    {
+                        "pose": SE3(self.poses),
+                        "dense_disp": disps_flattened,
+                        "intrinsics": self.intrinsics,
+                        "rig": SE3(self.rig),
+                    }
+                )
+                ba_energy.append(cur_energy)
+                if verbose:
+                    logger.info(f"BA iters = {n_iters}, energy: {ba_energy[0]} -> {ba_energy[-1]}")
+
+            self.disps.clamp_(min=0.001)
 
     def reproject_dense_disp(self, ii: torch.Tensor, jj: torch.Tensor):
         """project points from ii -> jj. This will be optical flow from ii to jj when subtracted coords0"""
@@ -723,7 +719,7 @@ class GraphBuffer:
             t_range = torch.arange(self.n_frames, device=self.device)
 
         c2w_se3 = SE3(self.poses[t_range]).inv()
-        images = rearrange(self.images[t_range][..., 3::8, 3::8], "n v c h w -> n v h w c")
+        images = rearrange(self.images.to(self.device)[t_range][..., 3::8, 3::8], "n v c h w -> n v h w c")
         n_frames, n_views, ht, wd, _ = images.shape
 
         pts_list, mask_list = [], []
@@ -763,6 +759,8 @@ class GraphBuffer:
             images,
             torch.stack(mask_list, dim=1),
             self.tstamp[t_range],
+            self.embeddings[t_range].permute(0,1,3,4,2),
+            self.embedding_valid_mask[t_range]
         )
 
     def log_tracks(self):
@@ -776,7 +774,9 @@ class GraphBuffer:
             rr.set_time_sequence("frame", int(frame_indices[kf_idx]))
 
             for v in range(self.n_views):
-                canvas = self.images[kf_idx, v].moveaxis(0, -1).cpu().numpy().astype(np.float32)
+                # Change:
+                # canvas = self.images[kf_idx, v].moveaxis(0, -1).cpu().numpy().astype(np.float32)
+                canvas = self.images[kf_idx, v].moveaxis(0, -1).numpy().astype(np.float32)
                 canvas = (canvas * 255).astype(np.uint8)
 
                 for delta_kf_cnt in range(10):
@@ -847,7 +847,9 @@ class GraphBuffer:
                 dd_ht, dd_wd = self.disps_sens.shape[-2:]
 
                 pcd_xyz, pcd_rgb = current_map.get_dense_disp_pcd(di, v)
-                image = self.images[int(didx), v, :, 3::8, 3::8].moveaxis(0, -1).cpu().numpy()
+                # Change:
+                # image = self.images[int(didx), v, :, 3::8, 3::8].moveaxis(0, -1).cpu().numpy()
+                image = self.images[int(didx), v, :, 3::8, 3::8].moveaxis(0, -1).numpy()
 
                 #     rr.log(
                 #         f"world/kf_{didx:04d}/v{v}",
