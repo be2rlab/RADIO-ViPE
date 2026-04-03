@@ -65,5 +65,27 @@ ba:
     max_snapshots: 100
     output_dir: tum_results/debug_embedding
 
+use_depth_prior_init: true
+
+embedding_covisibility:
+  enabled: true
+  weight: 5.0
+
+loop_closure:
+  enabled: true
+  similarity_thresh: 0.80
+  min_interval: 15
+  max_candidates: 3
+  pose_graph_steps: 2
+  pose_graph_iters: 4
+
+adaptive_frontend_iters:
+  enabled: false
+  min_iters1: 2
+  max_iters1: 5
+  min_iters2: 1
+  max_iters2: 3
+  convergence_thresh: 0.025
+
 sparse_tracks:
   name: dummy

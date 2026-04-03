@@ -18,6 +18,8 @@
 # Licensed under the MIT License. See THIRD_PARTY_LICENSES.md for details.
 # -------------------------------------------------------------------------------------------------
 
+import logging
+
 import torch
 
 from omegaconf import DictConfig
@@ -27,6 +29,10 @@ from vipe.priors.depth import DepthEstimationModel
 from ..networks.droid_net import DroidNet
 from .buffer import GraphBuffer
 from .factor_graph import FactorGraph
+from .loop_closure import LoopClosureDetector
+
+
+logger = logging.getLogger(__name__)
 
 
 class SLAMBackend:
@@ -35,6 +41,7 @@ class SLAMBackend:
     """
 
     depth_model: DepthEstimationModel | None = None
+    loop_closure: LoopClosureDetector | None = None
 
     def __init__(self, net: DroidNet, video: GraphBuffer, args: DictConfig, device: torch.device):
         self.net = net
@@ -71,12 +78,35 @@ class SLAMBackend:
             solver_verbose=True,
         )
 
+    def _inject_loop_closure_edges(self, graph: FactorGraph, t: int) -> bool:
+        """Add loop closure edges to the factor graph. Returns True if any were added."""
+        if self.loop_closure is None:
+            return False
+
+        lc_tensors = self.loop_closure.get_loop_edges_tensors()
+        if lc_tensors is None:
+            return False
+
+        ii_lc, jj_lc = lc_tensors
+        valid = (ii_lc < t) & (jj_lc < t) & (ii_lc >= 0) & (jj_lc >= 0)
+        if not valid.any():
+            return False
+
+        n_before = graph.ii.shape[0]
+        graph.add_factors(ii_lc[valid], jj_lc[valid])
+        n_added = graph.ii.shape[0] - n_before
+        if n_added > 0:
+            logger.info("Added %d loop closure edges to backend graph", n_added)
+        return n_added > 0
+
     @torch.no_grad()
     def run(self, steps: int = 12, update_depth: bool = True, log: bool = False):
         """main update (reset GRU state)"""
 
         t = self.video.n_frames
 
+        ec_cfg = getattr(self.args, "embedding_covisibility", None)
+        ec_weight = float(getattr(ec_cfg, "weight", 0.0)) if ec_cfg and getattr(ec_cfg, "enabled", False) else 0.0
         graph = FactorGraph(
             self.net,
             self.video,
@@ -85,6 +115,7 @@ class SLAMBackend:
             incremental=False,
             cross_view=self.args.cross_view,
             use_semantic_flow_init=getattr(self.args, "use_semantic_flow_init", False),
+            embedding_covisibility_weight=ec_weight,
         )
 
         graph.add_proximity_factors(
@@ -94,10 +125,28 @@ class SLAMBackend:
             beta=self.args.beta,
         )
 
+        has_loops = self._inject_loop_closure_edges(graph, t)
+
         if self.args.adaptive_cross_view:
             self.video.build_adaptive_cross_view_idx()
 
         if len(graph.ii) > 0:
+            if has_loops:
+                lc_cfg = getattr(self.args, "loop_closure", None)
+                pg_steps = int(getattr(lc_cfg, "pose_graph_steps", 2)) if lc_cfg else 2
+                pg_iters = int(getattr(lc_cfg, "pose_graph_iters", 4)) if lc_cfg else 4
+                logger.info(
+                    "Running pose-graph pre-optimization (%d steps, %d iters)",
+                    pg_steps, pg_iters,
+                )
+                graph.update_batch(
+                    itrs=pg_iters,
+                    steps=pg_steps,
+                    optimize_intrinsics=False,
+                    optimize_rig_rotation=False,
+                    motion_only=True,
+                )
+
             more_iters = self.args.optimize_intrinsics or self.args.optimize_rig_rotation
             if self.depth_model is not None:
                 self._iterate_with_depth(graph, steps, more_iters)

@@ -18,6 +18,8 @@
 # Licensed under the MIT License. See THIRD_PARTY_LICENSES.md for details.
 # -------------------------------------------------------------------------------------------------
 
+import logging
+
 import torch
 
 from omegaconf import DictConfig
@@ -27,6 +29,10 @@ from vipe.ext.lietorch import SE3
 from ..networks.droid_net import DroidNet
 from .buffer import GraphBuffer
 from .factor_graph import FactorGraph
+from .loop_closure import LoopClosureDetector
+
+
+logger = logging.getLogger(__name__)
 
 
 class SLAMFrontend:
@@ -35,8 +41,13 @@ class SLAMFrontend:
     For keyframe, it handles the system initialization and partial update logic (i.e. use BA to get pose for this kf).
     """
 
+    loop_closure: LoopClosureDetector | None = None
+
     def __init__(self, net: DroidNet, video: GraphBuffer, args: DictConfig, device: torch.device):
         self.video = video
+        self.device = device
+        ec_cfg = getattr(args, "embedding_covisibility", None)
+        ec_weight = float(getattr(ec_cfg, "weight", 0.0)) if ec_cfg and getattr(ec_cfg, "enabled", False) else 0.0
         self.graph = FactorGraph(
             net,
             video,
@@ -45,6 +56,7 @@ class SLAMFrontend:
             incremental=True,
             cross_view=args.cross_view,
             use_semantic_flow_init=getattr(args, "use_semantic_flow_init", False),
+            embedding_covisibility_weight=ec_weight,
         )
 
         # Number of frames that the frontend has so far optimized.
@@ -54,8 +66,25 @@ class SLAMFrontend:
         self.is_initialized = False
 
         self.max_age = 25
-        self.iters1 = 4
-        self.iters2 = 2
+        self._idx_buf = torch.zeros(2, dtype=torch.long, device=device)  # [t1-3, t1-2]
+        self._ii_min: int = 0  # updated whenever factors are added/removed
+
+        # Adaptive iteration parameters
+        adaptive_cfg = getattr(args, "adaptive_frontend_iters", None)
+        if adaptive_cfg is not None and getattr(adaptive_cfg, "enabled", False):
+            self.adaptive_iters = True
+            self.min_iters1 = int(getattr(adaptive_cfg, "min_iters1", 2))
+            self.max_iters1 = int(getattr(adaptive_cfg, "max_iters1", 8))
+            self.min_iters2 = int(getattr(adaptive_cfg, "min_iters2", 1))
+            self.max_iters2 = int(getattr(adaptive_cfg, "max_iters2", 4))
+            self.convergence_thresh = float(getattr(adaptive_cfg, "convergence_thresh", 0.025))
+        else:
+            self.adaptive_iters = False
+            self.min_iters1 = 4
+            self.max_iters1 = 4
+            self.min_iters2 = 2
+            self.max_iters2 = 2
+            self.convergence_thresh = 0.0
 
         # Number of frames to wait before initializing (default 8)
         self.args = args
@@ -67,6 +96,7 @@ class SLAMFrontend:
         self.frontend_thresh = args.frontend_thresh
         self.frontend_radius = args.frontend_radius
         self.has_init_pose = args.has_init_pose
+        self.use_depth_prior_init = getattr(args, "use_depth_prior_init", True)
 
     def __init_pose(self):
         assert self.t1 > 1
@@ -85,8 +115,11 @@ class SLAMFrontend:
         # t1 - 2 is the previous frame
         # t1 - 3 is the frame before the previous frame
 
-        if self.graph.corr is not None:
+        if self.graph.corr is not None and self.graph.age.max().item() > self.max_age:
             self.graph.rm_factors(self.graph.age > self.max_age, store=True)
+            # Keep _ii_min in sync after removals.
+            if self.graph.ii is not None and len(self.graph.ii) > 0:
+                self._ii_min = int(self.graph.ii.min().item())
 
         self.graph.add_proximity_factors(
             self.t1 - 5,
@@ -98,31 +131,35 @@ class SLAMFrontend:
             remove=True,
         )
 
-        for _ in range(self.iters1):
-            self.graph.update(use_inactive=True, fixed_motion=self.has_init_pose)
+        self._run_adaptive_iters(self.min_iters1, self.max_iters1)
+        self._idx_buf[0] = self.t1 - 3
+        self._idx_buf[1] = self.t1 - 2
 
         # remove frame t1-2 if it is too close to t1-3, so the new keyframes will be [t1-3, t1-1]
         d = self.video.frame_distance_dense_disp(
-            torch.tensor([self.t1 - 3]),
-            torch.tensor([self.t1 - 2]),
+            self._idx_buf[:1],   # t1-3
+            self._idx_buf[1:],   # t1-2
             beta=self.beta,
             bidirectional=True,
         )
         if d.max().item() < self.keyframe_thresh:
-            self.graph.rm_second_newest_keyframe(self.t1 - 2)
+            removed_idx = self.t1 - 2
+            self.graph.rm_second_newest_keyframe(removed_idx)
             self.t1 -= 1
+            # Keep _ii_min in sync after keyframe removal.
+            if self.graph.ii is not None and len(self.graph.ii) > 0:
+                self._ii_min = int(self.graph.ii.min().item())
+            if self.loop_closure is not None:
+                self.loop_closure.update_after_removal(removed_idx)
         else:
-            for _ in range(self.iters2):
-                self.graph.update(use_inactive=True, fixed_motion=self.has_init_pose)
+            self._run_adaptive_iters(self.min_iters2, self.max_iters2)
 
-        # set pose for next itration
+        # set pose for next iteration
         if not self.has_init_pose:
             self.__init_pose()
-        for v in range(self.video.n_views):
-            self.video.disps[self.t1, v] = self.video.disps[self.t1 - 1, v].mean()
+        self._predict_next_disp()
 
-        # update visualization
-        self.video.dirty[self.graph.ii.min() : self.t1] = True
+        self.video.dirty[self._ii_min : self.t1] = True
 
     def __initialize(self):
         """initialize the SLAM system with keyframes idx [t0, t1)"""
@@ -140,13 +177,57 @@ class SLAMFrontend:
 
         if not self.has_init_pose:
             self.__init_pose()
-        for v in range(self.video.n_views):
-            self.video.disps[self.t1, v] = self.video.disps[self.t1 - 4 : self.t1, v].mean()
+        self._predict_next_disp()
         self.video.dirty[: self.t1] = True
 
         # initialization complete
         self.is_initialized = True
         self.graph.rm_factors(self.graph.ii < self.warmup - 4, store=True)
+
+        # Sync _ii_min after initialization's final rm_factors.
+        if self.graph.ii is not None and len(self.graph.ii) > 0:
+            self._ii_min = int(self.graph.ii.min().item())
+
+    def _run_adaptive_iters(self, min_iters: int, max_iters: int):
+        """Run GRU update iterations, stopping early when the flow delta converges.
+        """
+        delta_norm = float("inf")
+        for i in range(max_iters):
+            delta_norm = self.graph.update(
+                use_inactive=True, fixed_motion=self.has_init_pose
+            )
+            if i < min_iters - 1:
+                # Haven't done the minimum yet — keep going unconditionally.
+                continue
+            if self.adaptive_iters and delta_norm < self.convergence_thresh:
+                logger.debug(
+                    "Frontend converged at iter %d/%d (delta=%.4f < %.4f)",
+                    i + 1, max_iters, delta_norm, self.convergence_thresh,
+                )
+                break
+
+    def _predict_next_disp(self):
+        """Predict disparity for the next keyframe slot using depth prior when available.
+        """
+        # disps_sens / disps shape: (T, V, H, W)
+        if self.use_depth_prior_init:
+            sens = self.video.disps_sens[self.t1 - 1]           # (V, H, W)
+            # Boolean mask: True for views that have valid sensor data.
+            valid = sens.sum(dim=(-2, -1)) > 0                  # (V,)
+            sens_mean = sens.mean(dim=(-2, -1))                  # (V,)
+            prev_mean = self.video.disps[self.t1 - 1].mean(dim=(-2, -1))  # (V,)
+            # Blend: use sensor mean where valid, previous frame mean elsewhere.
+            next_disp_val = torch.where(valid, sens_mean, prev_mean)  # (V,)
+            # Broadcast scalar-per-view back to (V, H, W).
+            self.video.disps[self.t1] = next_disp_val[:, None, None].expand_as(
+                self.video.disps[self.t1]
+            )
+        else:
+            # All views: just take the spatial mean of the previous frame.
+            prev_mean = self.video.disps[self.t1 - 1].mean(dim=(-2, -1))  # (V,)
+            self.video.disps[self.t1] = prev_mean[:, None, None].expand_as(
+                self.video.disps[self.t1]
+            )
 
     def run(self):
         """main update"""
@@ -158,3 +239,4 @@ class SLAMFrontend:
         # do update if new keyframe is added.
         elif self.is_initialized and self.t1 < self.video.n_frames:
             self.__update()
+
