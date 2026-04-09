@@ -18,6 +18,8 @@
 # Licensed under the MIT License. See THIRD_PARTY_LICENSES.md for details.
 # -------------------------------------------------------------------------------------------------
 
+# /vipe/slam/components/factor_graph.py
+
 import warnings
 
 import numpy as np
@@ -32,6 +34,7 @@ from vipe.ext.lietorch import SE3
 from ..networks.droid_net import AltCorrBlock, CorrBlock, DroidNet
 from ..semantic_flow import blend_flow_prior, semantic_flow_init
 from .buffer import GraphBuffer
+from vipe.utils.profiler import profile_function, profiler_section
 
 
 # Disable all future warnings (mainly torch.cuda.amp related)
@@ -160,12 +163,14 @@ class FactorGraph:
             inp = self.buffer.inps[pi, qi][None]
             self.inp = inp if self.inp is None else torch.cat([self.inp, inp], 1)
 
-        with torch.cuda.amp.autocast(enabled=False):
+        with torch.amp.autocast("cuda", enabled=False):
             target, _ = self.buffer.reproject_dense_disp(ii, jj)
 
             if self.use_semantic_flow_init and self.buffer.embeddings is not None:
                 photo_conf = torch.zeros(target.shape[:-1], device=target.device)
-                target = self._blend_semantic_flow(target, photo_conf, di, dj)
+                with torch.no_grad():
+                    with profiler_section("fg.semantic_flow_init"):
+                        target = self._blend_semantic_flow(target, photo_conf, di, dj)
 
             target = target[None]
             weight = torch.zeros_like(target)
@@ -243,91 +248,69 @@ class FactorGraph:
         self,
         t0: int | None = None,  # will limit pose update to >= t0 if provided
         t1: int | None = None,  # will limit pose update to < t1 if provided
-        itrs: int = 3,
+        itrs: int = 1,
         use_inactive: bool = False,
         motion_only: bool = False,
         fixed_motion: bool = False,
         limited_disp: bool = False,
-    ) -> float:
-        """run update operator on factor graph
-
-        Returns:
-            Mean L2 norm of the GRU flow delta (pixels). Useful for
-            adaptive iteration: small values indicate convergence.
-        """
+        )-> float:
         assert self.incremental
         assert self.corr is not None and self.inp is not None and self.f_net is not None
         assert not (motion_only and fixed_motion)
 
         if t0 is None:
             t0 = int(max(1, self.ii.min().item() + 1))
-
         if t1 is None:
             t1 = int(max(self.ii.max().item(), self.jj.max().item()) + 1)
 
-        # motion features
-        with torch.cuda.amp.autocast(enabled=False):
-            coords1, _ = self.buffer.reproject_dense_disp(self.ii, self.jj)
-            coords1 = coords1[None]  # NV, ht, wd, 2 -> 1, NV, ht, wd, 2
-            # Prepare motion features:
-            # - first 2 dimension is the current rigid flow.
-            # - last 2 dimension residual flow of last update.
-            motn = torch.cat([coords1 - self.coords0, self.target - coords1], dim=-1)
-            # (edge, view, ht, wd, 4) -> (edge, view, 4, ht, wd)
-            motn = motn.permute(0, 1, 4, 2, 3).clamp(-64.0, 64.0)
+        with profiler_section("fg.reproject_motion"):
+            with torch.cuda.amp.autocast(enabled=False):
+                coords1, _ = self.buffer.reproject_dense_disp(self.ii, self.jj)
+                coords1 = coords1[None]
+                motn = torch.cat([coords1 - self.coords0, self.target - coords1], dim=-1)
+                motn = motn.permute(0, 1, 4, 2, 3).clamp(-64.0, 64.0)
 
-        # correlation features
-        corr = self.corr(coords1)
+        with profiler_section("fg.correlation_lookup"):
+            corr = self.corr(coords1)
 
-        # Apply network
-        pi, qi, di, _, _, _ = self.buffer.expand_edge_multiview(self.ii, self.jj)
-        di, dix = torch.unique(di, return_inverse=True)
-        self.f_net, delta, weight, damping, _ = self.net.update.forward(  # type: ignore
-            self.f_net, self.inp, corr, motn, ix=dix
-        )
-        weight[:, self.buffer.masks[pi, qi]] = 0.0
+        with profiler_section("fg.gru_forward"):
+            pi, qi, di, _, _, _ = self.buffer.expand_edge_multiview(self.ii, self.jj)
+            di, dix = torch.unique(di, return_inverse=True)
+            self.f_net, delta, weight, damping, _ = self.net.update.forward(
+                self.f_net, self.inp, corr, motn, ix=dix
+            )
+            weight[:, self.buffer.masks[pi, qi]] = 0.0
 
         delta_norm = delta.norm(dim=-1).mean().item()
 
-        with torch.cuda.amp.autocast(enabled=False):
-            self.target = coords1 + delta.to(dtype=torch.float)
-            self.weight = weight.to(dtype=torch.float)
-            # Overwrite damping with newly computed values
-            self.damping[di] = damping
+        with profiler_section("fg.bundle_adjustment"):
+            with torch.amp.autocast("cuda", enabled=False):
+                self.target = coords1 + delta.to(dtype=torch.float)
+                self.weight = weight.to(dtype=torch.float)
+                self.damping[di] = damping
 
-            if use_inactive:
-                m = (self.ii_inac >= t0 - 3) & (self.jj_inac >= t0 - 3)
-                ii = torch.cat([self.ii_inac[m], self.ii], 0)
-                jj = torch.cat([self.jj_inac[m], self.jj], 0)
-                exp_m = m.view(-1, 1).repeat(1, self.buffer.n_views).view(-1)
-                target = torch.cat([self.target_inac[:, exp_m], self.target], 1)
-                weight = torch.cat([self.weight_inac[:, exp_m], self.weight], 1)
+                if use_inactive:
+                    m = (self.ii_inac >= t0 - 3) & (self.jj_inac >= t0 - 3)
+                    ii = torch.cat([self.ii_inac[m], self.ii], 0)
+                    jj = torch.cat([self.jj_inac[m], self.jj], 0)
+                    exp_m = m.view(-1, 1).repeat(1, self.buffer.n_views).view(-1)
+                    target = torch.cat([self.target_inac[:, exp_m], self.target], 1)
+                    weight = torch.cat([self.weight_inac[:, exp_m], self.weight], 1)
+                else:
+                    ii, jj, target, weight = self.ii, self.jj, self.target, self.weight
 
-            else:
-                ii, jj, target, weight = self.ii, self.jj, self.target, self.weight
+                ht, wd = self.coords0.shape[0:2]
+                target = rearrange(target, "1 k h w c -> k (h w) c", c=2, h=ht, w=wd)
+                weight = rearrange(weight, "1 k h w c -> k (h w) c", c=2, h=ht, w=wd)
 
-            ht, wd = self.coords0.shape[0:2]
-            target = rearrange(target, "1 k h w c -> k (h w) c", c=2, h=ht, w=wd)
-            weight = rearrange(weight, "1 k h w c -> k (h w) c", c=2, h=ht, w=wd)
-
-            # dense bundle adjustment
-            self.buffer.bundle_adjustment(
-                target=target,
-                weight=weight,
-                disp_damping=self.damping,
-                ii=ii,
-                jj=jj,
-                t0=t0,
-                t1=t1 if not fixed_motion else t0,
-                n_iters=itrs,
-                pose_damping=1e-3,
-                pose_ep=0.1,
-                motion_only=motion_only,
-                limited_disp=limited_disp,
-                optimize_intrinsics=False,
-                optimize_rig_rotation=False,
-                verbose=False,
-            )
+                self.buffer.bundle_adjustment(
+                    target=target, weight=weight, disp_damping=self.damping,
+                    ii=ii, jj=jj, t0=t0, t1=t1 if not fixed_motion else t0,
+                    n_iters=itrs, pose_damping=1e-3, pose_ep=0.1,
+                    motion_only=motion_only, limited_disp=limited_disp,
+                    optimize_intrinsics=False, optimize_rig_rotation=False,
+                    verbose=False,
+                )
 
         self.age += 1
         return delta_norm
@@ -414,30 +397,17 @@ class FactorGraph:
                 verbose=solver_verbose,
             )
 
+
     def _blend_semantic_flow(
         self,
         target: torch.Tensor,
         photo_conf: torch.Tensor,
         di: torch.Tensor,
         dj: torch.Tensor,
+        chunk_size: int = 16,
     ) -> torch.Tensor:
-        """
-        For each edge, compute semantic flow and blend with the geometric prior.
-
-        Vectorised validity checking, batched embedding resize, per-edge
-        correlation (memory-bounded), and vectorised blend.
-
-        Args:
-            target:     (N_edges, ht, wd, 2) geometric prior (absolute coords).
-            photo_conf: (N_edges, ht, wd) photometric confidence (0 at init).
-            di:         (N_edges,) source flattened view indices into embeddings.
-            dj:         (N_edges,) target flattened view indices into embeddings.
-
-        Returns:
-            blended: (N_edges, ht, wd, 2) blended target.
-        """
-        embeddings = self.buffer.flattened_embeddings  # (NV, C, H_emb, W_emb)
-        valid_mask = self.buffer.flattened_embedding_valid_mask  # (NV, H_emb, W_emb)
+        embeddings = self.buffer.flattened_embeddings
+        valid_mask = self.buffer.flattened_embedding_valid_mask
         ht, wd = self.coords0.shape[0:2]
         H_emb, W_emb = embeddings.shape[2], embeddings.shape[3]
         need_resize = (H_emb != ht) or (W_emb != wd)
@@ -452,39 +422,36 @@ class FactorGraph:
 
         di_v = di[valid_idx]
         dj_v = dj[valid_idx]
-
-        Z_i = embeddings[di_v]
-        Z_j = embeddings[dj_v]
-        if need_resize:
-            stacked = torch.cat([Z_i, Z_j], dim=0).float()
-            stacked = F.interpolate(
-                stacked, size=(ht, wd), mode="bilinear", align_corners=True,
-            )
-            M = len(valid_idx)
-            Z_i, Z_j = stacked[:M], stacked[M:]
-        else:
-            Z_i = Z_i.float()
-            Z_j = Z_j.float()
-
         target_v = target[valid_idx]
-        omega_sems = torch.empty_like(target_v)
-        sem_confs = torch.empty(
-            len(valid_idx), ht, wd, device=target.device, dtype=target.dtype
-        )
-        for k in range(len(valid_idx)):
-            omega_sems[k], sem_confs[k] = semantic_flow_init(
-                Z_i[k], Z_j[k], target_v[k]
-            )
+        photo_v = photo_conf[valid_idx]
 
-        beta = photo_conf[valid_idx] / (
-            photo_conf[valid_idx] + sem_confs + 1e-6
-        )
-        blended = target.clone()
-        blended[valid_idx] = (
-            beta.unsqueeze(-1) * target_v
-            + (1.0 - beta.unsqueeze(-1)) * omega_sems
-        )
-        return blended
+        for start in range(0, len(valid_idx), chunk_size):
+            end = min(start + chunk_size, len(valid_idx))
+
+            z_i = embeddings[di_v[start:end]]       # (chunk, C, H_emb, W_emb)
+            z_j = embeddings[dj_v[start:end]]
+            if need_resize:
+                z_i = F.interpolate(z_i.float(), size=(ht, wd), mode="bilinear", align_corners=True)
+                z_j = F.interpolate(z_j.float(), size=(ht, wd), mode="bilinear", align_corners=True)
+            else:
+                z_i = z_i.float()
+                z_j = z_j.float()
+
+            # semantic_flow_init is still per-edge (grid_sample loop inside),
+            # but the interpolation cost is amortised over the chunk
+            for k in range(end - start):
+                omega_sem, sem_conf = semantic_flow_init(
+                    z_i[k], z_j[k], target_v[start + k]
+                )
+                beta = photo_v[start + k] / (photo_v[start + k] + sem_conf + 1e-6)
+                target[valid_idx[start + k]] = (
+                    beta.unsqueeze(-1) * target_v[start + k]
+                    + (1.0 - beta.unsqueeze(-1)) * omega_sem
+                )
+
+            del z_i, z_j  # free chunk before next iteration
+
+        return target
 
     def add_neighborhood_factors(self, t0, t1, r: int = 3):
         """

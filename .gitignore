@@ -184,3 +184,4 @@ tum_results
 aria_results/
 **.pt
 experiments/*
+/trt_artifacts

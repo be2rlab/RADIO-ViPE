@@ -2,7 +2,7 @@ services:
   vipe:
     build:
       context: ./
-      dockerfile: ./docker/Dockerfile
+      dockerfile: ./docker/Dockerfile_TRT
     image: vipe:latest
     restart: unless-stopped
     network_mode: host

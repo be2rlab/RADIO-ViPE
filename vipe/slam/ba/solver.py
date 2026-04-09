@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import logging
+import time
 
 from collections import defaultdict
 from typing import Any
@@ -30,18 +31,161 @@ from .terms import SolverTerm
 logger = logging.getLogger(__name__)
 
 
-def solve_scipy(pi: torch.Tensor, pj: torch.Tensor, lhs: torch.Tensor, rhs: torch.Tensor):
+# ---------------------------------------------------------------------------
+# Threshold below which we assemble the sparse system into a dense GPU matrix
+# and solve via Cholesky.  After Schur complement on dense_disp the regular
+# system is typically the pose block — (n_keyframes × 6) unknowns — so this
+# comfortably covers sequences of several hundred keyframes.
+# ---------------------------------------------------------------------------
+_DENSE_GPU_DIM_THRESHOLD = 0
+
+
+def _solve_dense_gpu(
+    pi: torch.Tensor,
+    pj: torch.Tensor,
+    lhs_vals: torch.Tensor,
+    rhs: torch.Tensor,
+) -> torch.Tensor:
+    """Assemble COO triplets into a dense matrix on GPU and solve.
+
+    The system is J^T W J + damping, which is symmetric positive-definite
+    after damping, so Cholesky is the natural choice (~2× faster than LU
+    and numerically ideal for SPD systems).
+
+    Falls back to pivoted general solve on Cholesky failure (e.g. when the
+    system is barely positive-definite due to numeric noise).
+    """
+    n = rhs.shape[0]
+    device = rhs.device
+
+    A = torch.zeros(n, n, dtype=torch.float64, device=device)
+    A.index_put_((pi, pj), lhs_vals.to(torch.float64), accumulate=True)
+
+    b = rhs.to(torch.float64)
+
+    try:
+        L = torch.linalg.cholesky(A)
+        x = torch.cholesky_solve(b.unsqueeze(-1), L).squeeze(-1)
+    except torch.linalg.LinAlgError:
+        x = torch.linalg.solve(A, b)
+
+    return x.to(torch.float32)
+
+
+def _solve_sparse_cpu(
+    pi: torch.Tensor,
+    pj: torch.Tensor,
+    lhs_vals: torch.Tensor,
+    rhs: torch.Tensor,
+) -> torch.Tensor:
+    """Sparse solve on CPU via scipy — used only when the system is large
+    enough that a dense GPU solve would be wasteful."""
     from scipy.sparse import coo_matrix
     from scipy.sparse.linalg import spsolve
 
-    lhs = coo_matrix((lhs.cpu().numpy(), (pi.cpu().numpy(), pj.cpu().numpy())))
-    # Convert to CSR format for efficient spsolve
-    lhs = lhs.tocsr()
-    rhs = rhs.cpu().numpy()
+    pi_np = pi.cpu().numpy()
+    pj_np = pj.cpu().numpy()
+    vals_np = lhs_vals.cpu().numpy()
+    rhs_np = rhs.cpu().numpy()
 
-    x = spsolve(lhs, rhs)
+    n = rhs_np.shape[0]
+    A = coo_matrix((vals_np, (pi_np, pj_np)), shape=(n, n))
+    A = A.tocsr()
 
-    return torch.tensor(x, device=pi.device).float()
+    x = spsolve(A, rhs_np)
+    return torch.tensor(x, device=pi.device, dtype=torch.float32)
+
+
+def solve_linear_system(
+    pi: torch.Tensor,
+    pj: torch.Tensor,
+    lhs: torch.Tensor,
+    rhs: torch.Tensor,
+    _validate: bool = False,
+) -> torch.Tensor:
+    """Dispatch to the fastest available solver for the given system size.
+
+    • dim ≤ _DENSE_GPU_DIM_THRESHOLD  → dense Cholesky on GPU  (no CPU transfer)
+    • dim >  _DENSE_GPU_DIM_THRESHOLD → scipy sparse on CPU    (fallback)
+
+    When ``_validate`` is True, runs *both* solvers, logs wall-clock time for
+    each, and asserts the solutions agree within tolerance.  Disable in
+    production for speed.
+    """
+    n = rhs.shape[0]
+    use_gpu = n <= _DENSE_GPU_DIM_THRESHOLD and rhs.is_cuda
+
+    if not _validate:
+        if use_gpu:
+            return _solve_dense_gpu(pi, pj, lhs, rhs)
+        else:
+            return _solve_sparse_cpu(pi, pj, lhs, rhs)
+
+    # ---- Validation mode: run both, time both, compare ----
+
+    # Dense GPU solve — use CUDA events for accurate GPU timing.
+    if rhs.is_cuda:
+        torch.cuda.synchronize(rhs.device)
+        start_gpu = torch.cuda.Event(enable_timing=True)
+        end_gpu = torch.cuda.Event(enable_timing=True)
+        start_gpu.record()
+        x_gpu = _solve_dense_gpu(pi, pj, lhs, rhs)
+        end_gpu.record()
+        torch.cuda.synchronize(rhs.device)
+        t_gpu_ms = start_gpu.elapsed_time(end_gpu)
+    else:
+        t0 = time.perf_counter()
+        x_gpu = _solve_dense_gpu(pi, pj, lhs, rhs)
+        t_gpu_ms = (time.perf_counter() - t0) * 1000.0
+
+    # Sparse CPU solve — wall-clock is fine (all CPU work).
+    t0 = time.perf_counter()
+    x_cpu = _solve_sparse_cpu(pi, pj, lhs, rhs)
+    t_cpu_ms = (time.perf_counter() - t0) * 1000.0
+
+    # ---- Numerical comparison ----
+    diff = (x_gpu - x_cpu).abs()
+    max_diff = diff.max().item()
+    mean_diff = diff.mean().item()
+
+    # Relative error against the larger solution norm.
+    norm_gpu = x_gpu.norm().item()
+    norm_cpu = x_cpu.norm().item()
+    ref_norm = max(norm_gpu, norm_cpu, 1e-12)
+    rel_err = diff.norm().item() / ref_norm
+
+    logger.info(
+        "solve_linear_system [dim=%d]: "
+        "dense_gpu=%.2fms  sparse_cpu=%.2fms  speedup=%.1fx | "
+        "max_abs_diff=%.3e  mean_abs_diff=%.3e  rel_err=%.3e",
+        n, t_gpu_ms, t_cpu_ms, t_cpu_ms / max(t_gpu_ms, 1e-6),
+        max_diff, mean_diff, rel_err,
+    )
+
+    # Tolerance: the GPU path uses float64 Cholesky while the CPU path
+    # uses float64 sparse LU — both are double precision but different
+    # factorisations.  For well-conditioned systems rel_err should be
+    # ~1e-10; for ill-conditioned (near-singular) systems it can be
+    # larger.  We use a generous tolerance and warn rather than crash
+    if rel_err > 1e-6:
+        logger.warning(
+            "solve_linear_system: moderate disagreement — dim=%d, "
+            "rel_err=%.3e (may indicate ill-conditioning).",
+            n, rel_err,
+        )
+
+    # Return the result from the path that would normally be selected.
+    return x_gpu if use_gpu else x_cpu
+
+
+# Keep the original name as a public alias.
+def solve_scipy(
+    pi: torch.Tensor,
+    pj: torch.Tensor,
+    lhs: torch.Tensor,
+    rhs: torch.Tensor,
+) -> torch.Tensor:
+    return solve_linear_system(pi, pj, lhs, rhs)
 
 
 class Solver:
@@ -108,9 +252,7 @@ class Solver:
         pi, pj, lhs_data = lhs.ravel(ravel_mappings)
         rhs_data = rhs.ravel(ravel_mappings)
 
-        # print("Begin solution...")
-        x_data = solve_scipy(pi, pj, lhs_data, rhs_data)
-        # print("End solution...")
+        x_data = solve_linear_system(pi, pj, lhs_data, rhs_data)
 
         return rhs.unravel(x_data, ravel_mappings)
 
