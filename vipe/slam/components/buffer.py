@@ -558,17 +558,6 @@ class GraphBuffer:
                     )
                 )
 
-            # self.debug_visualize_target_weight(
-            #     target,
-            #     weight,
-            #     pi,
-            #     pj,
-            #     qi,
-            #     qj,
-            #     # other_target=sparse_target,
-            #     # other_weight=sparse_weight,
-            # )
-
             solver.set_fixed(
                 "pose",
                 (torch.cat([pi_unique[pi_unique < t0], pi_unique[pi_unique >= t1]]) if t0 < t1 else None),

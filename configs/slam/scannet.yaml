@@ -1,6 +1,6 @@
 defaults:
-  - /dataset: aria
-buffer: 1024
+  - /dataset: scannet
+buffer: 512
 # weight for translation / rotation components of flow
 beta: 0.3
 # how much motion before considering new keyframe
@@ -45,12 +45,14 @@ map_filter_thresh: 0.05
 # Whether to visualize the results using rerun
 visualize: false
 # Use keyframe depth for recovering metric depth
-keyframe_depth: unidepth-l
-sequence_name:
+keyframe_depth: metric3d-small
+
+sequence_name: scene0011_00
+
 ba:
   dense_disp_alpha: 0.001
-  embedding_weight: 0.00
-  use_semantic_kernel: true
+  embedding_weight: 0.0
+  use_semantic_kernel: false
   # embedding_fine_iters: 4  # number of final BA iterations that include embedding term
   embedding_debug:
     enabled: false
@@ -59,6 +61,7 @@ ba:
     save_heatmaps: true
     samples_per_snapshot: 1
     max_snapshots: 100
+    output_dir: vipe_results/debug_embedding
 
 sparse_tracks:
   name: dummy

@@ -17,8 +17,13 @@ from pathlib import Path
 
 import cv2
 import torch
-
+import re
 from vipe.streams.base import ProcessedVideoStream, StreamList, VideoFrame, VideoStream
+
+def natural_keys(path):
+    # Splits the filename into a list of strings and integers
+    # "1200.jpg" -> ["", 1200, ".jpg"]
+    return [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', path.name)]
 
 
 class FrameDirStream(VideoStream):
@@ -44,8 +49,13 @@ class FrameDirStream(VideoStream):
         for ext in image_extensions:
             self.frame_files.extend(sorted(path.glob(f'*{ext}')))
             self.frame_files.extend(sorted(path.glob(f'*{ext.upper()}')))
-        
-        self.frame_files = sorted(list(set(self.frame_files)))
+        if dataset_name == 'scannet':
+            self.frame_files.sort(key=natural_keys)
+            print(self.frame_files)
+        else:
+            print("WE ARE NOT CONSIDERING SCANNET")
+            self.frame_files = sorted(list(set(self.frame_files)))
+            
         
         if not self.frame_files:
             raise ValueError(f"No image files found in directory: {path}")

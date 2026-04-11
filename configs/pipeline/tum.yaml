@@ -19,10 +19,10 @@ slam:
   model_family: "radseg"
   model_variant: "c-radio_v3-b"
   radseg_lang_model: "siglip2"
-  radseg_slide_crop: 224
-  radseg_slide_stride: 160
-  radseg_lang_align: False
-  pca_dim: 128
+  radseg_slide_crop: 336
+  radseg_slide_stride: 224
+  radseg_lang_align: true
+  pca_dim: 256
 
 # Post-processing configs
 post:

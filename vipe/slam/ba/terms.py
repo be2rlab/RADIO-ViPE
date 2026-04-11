@@ -23,7 +23,80 @@ from .kernel import RobustKernel
 
 
 logger = logging.getLogger(__name__)
+import os
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.cm as cm
+import numpy as np
 
+def save_semantic_kernel_maps(
+    alpha_before_repeat: torch.Tensor,  # (n_edges, H*W)  — BEFORE repeat_interleave
+    image_size: tuple[int, int],        # (H, W)
+    pose_i_inds: torch.Tensor,          # (n_edges,)
+    pose_j_inds: torch.Tensor,          # (n_edges,)
+    save_dir: str = "debug/semantic_kernels",
+    step: int | None = None,
+    alpha_min: float = -10.0,
+    alpha_max: float = 2.0,
+):
+    """
+    Saves one heatmap per edge, named:
+        edge_{src_pose_idx:04d}_to_{dst_pose_idx:04d}[_step_{step:06d}].png
+
+    Color convention:
+        - Warm (red)  → alpha near +2   → low/no robustification (trusted pixel)
+        - Cool (blue) → alpha near -10  → strong robustification (outlier pixel)
+    """
+    os.makedirs(save_dir, exist_ok=True)
+    H, W = image_size
+    n_edges = alpha_before_repeat.shape[0]
+
+    alpha_np = alpha_before_repeat.detach().cpu().float().numpy()  # (n_edges, H*W)
+    alpha_np = alpha_np.reshape(n_edges, H, W)
+
+    cmap = matplotlib.colormaps["RdYlBu_r"]
+
+    for k in range(n_edges):
+        i_idx = pose_i_inds[k].item()
+        j_idx = pose_j_inds[k].item()
+
+        step_suffix = f"_step_{step:06d}" if step is not None else ""
+        fname = f"edge_{i_idx:04d}_to_{j_idx:04d}{step_suffix}.png"
+        fpath = os.path.join(save_dir, fname)
+
+        kernel_map = alpha_np[k]  # (H, W)
+
+        fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+
+        # --- Heatmap ---
+        im = axes[0].imshow(
+            kernel_map,
+            cmap=cmap,
+            vmin=alpha_min,
+            vmax=alpha_max,
+            interpolation="nearest",
+        )
+        axes[0].set_title(f"Semantic kernel  {i_idx}→{j_idx}")
+        axes[0].axis("off")
+        plt.colorbar(im, ax=axes[0], fraction=0.046, pad=0.04)
+
+        # --- Histogram (useful to see distribution at a glance) ---
+        axes[1].hist(kernel_map.ravel(), bins=64, range=(alpha_min, alpha_max), color="steelblue")
+        axes[1].axvline(0.0, color="red", linestyle="--", linewidth=1, label="α=0")
+        axes[1].set_xlabel("α value")
+        axes[1].set_ylabel("pixel count")
+        axes[1].set_title("Distribution")
+        axes[1].legend()
+
+        fig.suptitle(
+            f"Edge {i_idx}→{j_idx}"
+            + (f"  |  step {step}" if step is not None else ""),
+            fontsize=12,
+        )
+        fig.tight_layout()
+        fig.savefig(fpath, dpi=120, bbox_inches="tight")
+        plt.close(fig)
 
 class TermEvalReturn(ABC):
     @abstractmethod
@@ -297,6 +370,18 @@ class DenseDepthFlowTerm(SolverTerm):
             emedding_redisdual, embedding_residual_weights = self.compute_embedding_residuals(coords,valid, self.device)
             emedding_redisdual = 1- emedding_redisdual
             self.calculate_alpha(emedding_redisdual,embedding_residual_weights)
+            # Let's check alpha dim then let's try to save it using what? 
+            # ── visualize BEFORE repeat_interleave (still one value per pixel) ──
+            # print(f"posi_i_ind are {self.pose_i_inds}")
+            # print(f"posi_j_ind are {self.pose_j_inds}")
+            # save_semantic_kernel_maps(
+            #     alpha_before_repeat=self.alpha,          # (n_edges, H*W)
+            #     image_size=self.image_size,
+            #     pose_i_inds=self.pose_i_inds,
+            #     pose_j_inds=self.pose_j_inds,
+            #     save_dir="debug/semantic_kernels",
+            #     step=getattr(self, "_vis_step", None),   # increment this externally if needed
+            # )
             self.alpha = torch.repeat_interleave(self.alpha, 2, dim=1)
         return ConcreteTermEvalReturn(
             J=J_dict,
@@ -390,10 +475,6 @@ class DenseDepthFlowTerm(SolverTerm):
         
         # Set alpha to -20 for values below 0.6, otherwise use sigmoid output
         self.alpha = torch.where(mask_below_threshold, torch.tensor(alpha_min, dtype=x.dtype, device=x.device), sigmoid_output)
-
-    # def calculate_alpha(self, embedding_residual,embedding_residual_weights,alpha_min = -20, alpha_max = 2):
-    #         x = embedding_residual
-    #         self.alpha = (alpha_max - alpha_min) / (1 + torch.exp(-(x - 0.5) / 0.1)) + alpha_min
 
 
     def _prepare_embedding_weight(self, weight: torch.Tensor | float) -> tuple[torch.Tensor, bool]:

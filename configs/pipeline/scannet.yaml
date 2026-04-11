@@ -1,5 +1,5 @@
 defaults:
-  - /slam: aria
+  - /slam: scannet
 
 instance: vipe.pipeline.default.DefaultAnnotationPipeline
 
@@ -7,37 +7,10 @@ instance: vipe.pipeline.default.DefaultAnnotationPipeline
 init:
   camera_type: "pinhole"
   intrinsics: "geocalib"
-  instance:
+  instance: null
     # kf_gap_sec: 2.0
     # phrases: 
-    # - hand
-    #   # - person
-    #   # - spoon
-    #   # - tablespoon
-    #   # - spatula
-    #   # - pan
-    #   # - bowl
-    #   # - plate
-    #   # - baking pan
-    #   # - cup
-    #   # - fork
-    #   # - kitchen utensil
-    #   # - bottle
-    #   # - chair
-    #   # - can
-    #   # - frisbee
-    #   # - jar
-    #   # - food object
-    #   # - tray
-    #   # - box
-    #   # - toy
-    #   # - step stool
-    #   # - wall artwork
-    #   # - desk clock
-    #   # - vase
-    #   # - coaster
-    #   # - cutting board
-    #   # - play set
+    #   - person
     # add_sky: false
 
 slam:
@@ -47,15 +20,14 @@ slam:
   model_family: "radseg"
   model_variant: "c-radio_v3-b"
   radseg_lang_model: "siglip2"
-  radseg_slide_crop: 224
-  radseg_slide_stride: 160
-  radseg_lang_align: False
+  radseg_slide_crop: 336
+  radseg_slide_stride: 224
+  radseg_lang_align: True
   pca_dim: 256
-
 
 # Post-processing configs
 post:
-  depth_align_model: "adaptive_unidepth-l"
+  depth_align_model: null
 
 # Output configs
 output:
@@ -65,8 +37,9 @@ output:
 
   # Save artifacts and a info file
   save_artifacts: false
-  
+
   save_slam_map: true
+
   # Visualization videos to BASE_PATH/vipe/xxx.mp4
   save_viz: false
   viz_downsample: 2

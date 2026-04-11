@@ -112,9 +112,6 @@ class SLAMMap:
         embeddings_flat = None
         embedding_valid_flat = None
         if embeddings is not None:
-            # print(f"embedding shape is {embeddings.shape}")
-            # print(f"mask shape is {mask.shape}")
-            # print(f"embedding masks shape is {embedding_mask.shape}")
             assert embeddings.shape[:4] == mask.shape, "Embeddings must align with xyz/rgb grid."
             embeddings_flat = embeddings.reshape(-1, embeddings.shape[-1])[mask.reshape(-1)]
             if embedding_mask is not None:

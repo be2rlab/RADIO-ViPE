@@ -673,7 +673,7 @@ class EmbeddingsPipeline:
             feats = feats.to(orig_device, non_blocking=True)
             patch_size = self.engine.model.patch_size
         else:
-            feats = self.engine._extract_dino_features_multiscale(image_tensor, scales=[1.0])
+            feats = self.engine.embed_frame(image_tensor)
             patch_size = self.engine.patch_size
 
         upfeats = self.upsample_features(

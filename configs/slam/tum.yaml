@@ -10,11 +10,11 @@ warmup: 8
 # threshold to create a new keyframe
 keyframe_thresh: 4.0
 # add edges between frames whithin this distance
-frontend_thresh: 16.0
+frontend_thresh: 32.0
 # frontend optimization window
 frontend_window: 25
 # force edges between frames within radius
-frontend_radius: 2
+frontend_radius: 8
 # non-maximal supression of edges
 frontend_nms: 1
 # Whether to initialize sequentially
@@ -22,7 +22,7 @@ seq_init: true
 # Keyframe ids for running backends
 frontend_backend_iters: [16, 64, 256]
 backend_thresh: 22.0
-backend_radius: 2
+backend_radius: 6
 backend_nms: 3
 backend_iters: 24
 # Initial values for disparity
@@ -51,11 +51,11 @@ sequence_name:
 
 ba:
   dense_disp_alpha: 0.001
-  embedding_weight: 0.001
+  embedding_weight: 0.00
   use_semantic_kernel: true
   # embedding_fine_iters: 4  # number of final BA iterations that include embedding term
   embedding_debug:
-    enabled: false
+    enabled: true
     log_every: 1
     log_stats: true
     save_heatmaps: true
