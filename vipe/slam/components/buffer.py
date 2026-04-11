@@ -18,6 +18,7 @@ from vipe.priors.depth.base import DepthType
 from vipe.utils.cameras import CameraType
 from vipe.utils.logging import pbar
 from vipe.utils.visualization import POINTS_STENCIL, draw_lines_batch, draw_points_batch
+from vipe.utils.profiler import profile_function, profiler_section
 
 from ..ba.solver import Solver, SparseBlockVector
 from ..ba.terms import DenseDepthFlowTerm, DispSensRegularizationTerm, EmbeddingSimilarityTerm
@@ -457,7 +458,7 @@ class GraphBuffer:
             di_unique = torch.unique(di)
             pi_unique = torch.unique(ii)  # Should be equivalent to unique(pi)
 
-            solver = Solver(compute_energy=verbose)
+            solver = Solver(compute_energy=True)
 
             embedding_term_activation_iter = n_iters
             embedding_term = None
@@ -624,20 +625,34 @@ class GraphBuffer:
             disps_flattened = rearrange(self.flattened_disps, "nv h w -> nv (h w)")
 
             ba_energy = []
+            best_energy = None
+            stall_count = 0
+            patience = 3 
             for iter_idx in range(n_iters):
                 if embedding_term is not None:
                     embedding_term.set_active(iter_idx >= embedding_term_activation_iter)
-                cur_energy = solver.run_inplace(
-                    {
-                        "pose": SE3(self.poses),
-                        "dense_disp": disps_flattened,
-                        "intrinsics": self.intrinsics,
-                        "rig": SE3(self.rig),
-                    }
-                )
+                with profiler_section("buffer.solver.run"):
+                    with torch.no_grad():
+                        cur_energy = solver.run_inplace(
+                            {
+                                "pose": SE3(self.poses),
+                                "dense_disp": disps_flattened,
+                                "intrinsics": self.intrinsics,
+                                "rig": SE3(self.rig),
+                            }
+                        )
                 ba_energy.append(cur_energy)
                 if verbose:
                     logger.info(f"BA iters = {n_iters}, energy: {ba_energy[0]} -> {ba_energy[-1]}")
+                if best_energy is None or cur_energy < best_energy - 1e-6 * abs(best_energy):
+                    best_energy = cur_energy
+                    stall_count = 0
+                else:
+                    stall_count += 1
+
+                if stall_count >= patience:
+                    logger.info(f"BA early stopping at iteration {iter_idx} with energy {cur_energy}")
+                    break
 
             self.disps.clamp_(min=0.001)
 

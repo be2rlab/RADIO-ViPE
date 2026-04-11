@@ -194,20 +194,24 @@ class SLAMFrontend:
     def _run_adaptive_iters(self, min_iters: int, max_iters: int):
         """Run GRU update iterations, stopping early when the flow delta converges.
         """
-        delta_norm = float("inf")
         for i in range(max_iters):
-            delta_norm = self.graph.update(
+            delta_norm, energy = self.graph.update(
                 use_inactive=True, fixed_motion=self.has_init_pose
             )
             if i < min_iters - 1:
-                # Haven't done the minimum yet — keep going unconditionally.
                 continue
-            if self.adaptive_iters and delta_norm < self.convergence_thresh:
-                logger.debug(
-                    "Frontend converged at iter %d/%d (delta=%.4f < %.4f)",
-                    i + 1, max_iters, delta_norm, self.convergence_thresh,
-                )
-                break
+
+            if self.adaptive_iters:
+                # Check both: flow delta AND energy convergence
+                rel_change = abs(prev_energy - energy) / (abs(prev_energy) + 1e-12)
+                if delta_norm < self.convergence_thresh or rel_change < 1e-4:
+                    logger.debug(
+                        "Frontend converged at iter %d/%d "
+                        "(delta=%.4f, energy_rel=%.2e)",
+                        i + 1, max_iters, delta_norm, rel_change,
+                    )
+                    break
+            prev_energy = energy
 
     def _predict_next_disp(self):
         """Predict disparity for the next keyframe slot using depth prior when available.

@@ -30,6 +30,7 @@ from ..networks.droid_net import DroidNet
 from .buffer import GraphBuffer
 from .factor_graph import FactorGraph
 from .loop_closure import LoopClosureDetector
+from vipe.utils.profiler import profile_function, profiler_section
 
 
 logger = logging.getLogger(__name__)
@@ -52,31 +53,35 @@ class SLAMBackend:
     def _iterate_with_depth(self, graph: FactorGraph, steps: int, more_iters: bool):
         steps_preintr = steps // 2
         steps_postintr = steps - steps_preintr
-        graph.update_batch(
-            itrs=16 if more_iters else 8,
-            steps=steps_preintr,
-            optimize_intrinsics=self.args.optimize_intrinsics,
-            optimize_rig_rotation=self.args.optimize_rig_rotation,
-            solver_verbose=True,
-        )
-        self.video.update_disps_sens(self.depth_model, frame_idx=None)
+        with profiler_section("backend.depth_estimation"):
+            graph.update_batch(
+                itrs=16 if more_iters else 8,
+                steps=steps_preintr,
+                optimize_intrinsics=self.args.optimize_intrinsics,
+                optimize_rig_rotation=self.args.optimize_rig_rotation,
+                solver_verbose=True,
+            )
+        with profiler_section("backend.depth_update"):
+            self.video.update_disps_sens(self.depth_model, frame_idx=None)
         # Don't update intrinsics again!
-        graph.update_batch(
-            itrs=16 if more_iters else 8,
-            steps=steps_postintr,
-            optimize_intrinsics=False,
-            optimize_rig_rotation=self.args.optimize_rig_rotation,
-            solver_verbose=True,
-        )
+        with profiler_section("backend.pose_graph_post_optimization"):
+            graph.update_batch(
+                itrs=16 if more_iters else 8,
+                steps=steps_postintr,
+                optimize_intrinsics=False,
+                optimize_rig_rotation=self.args.optimize_rig_rotation,
+                solver_verbose=True,
+            )
 
     def _iterate_without_depth(self, graph: FactorGraph, steps: int, more_iters: bool):
-        graph.update_batch(
-            itrs=16 if more_iters else 8,
-            steps=steps,
-            optimize_intrinsics=self.args.optimize_intrinsics,
-            optimize_rig_rotation=self.args.optimize_rig_rotation,
-            solver_verbose=True,
-        )
+        with profiler_section("backend.pose_graph_post_optimization"):
+            graph.update_batch(
+                itrs=16 if more_iters else 8,
+                steps=steps,
+                optimize_intrinsics=self.args.optimize_intrinsics,
+                optimize_rig_rotation=self.args.optimize_rig_rotation,
+                solver_verbose=True,
+            )
 
     def _inject_loop_closure_edges(self, graph: FactorGraph, t: int) -> bool:
         """Add loop closure edges to the factor graph. Returns True if any were added."""
@@ -118,12 +123,13 @@ class SLAMBackend:
             embedding_covisibility_weight=ec_weight,
         )
 
-        graph.add_proximity_factors(
-            rad=self.args.backend_radius,
-            nms=self.args.backend_nms,
-            thresh=self.args.backend_thresh,
-            beta=self.args.beta,
-        )
+        with profiler_section("backend.add_proximity_factors"):
+            graph.add_proximity_factors(
+                rad=self.args.backend_radius,
+                nms=self.args.backend_nms,
+                thresh=self.args.backend_thresh,
+                beta=self.args.beta,
+            )
 
         has_loops = self._inject_loop_closure_edges(graph, t)
 
@@ -139,13 +145,14 @@ class SLAMBackend:
                     "Running pose-graph pre-optimization (%d steps, %d iters)",
                     pg_steps, pg_iters,
                 )
-                graph.update_batch(
-                    itrs=pg_iters,
-                    steps=pg_steps,
-                    optimize_intrinsics=False,
-                    optimize_rig_rotation=False,
-                    motion_only=True,
-                )
+                with profiler_section("backend.pose_graph_pre_optimization"):
+                    graph.update_batch(
+                        itrs=pg_iters,
+                        steps=pg_steps,
+                        optimize_intrinsics=False,
+                        optimize_rig_rotation=False,
+                        motion_only=True,
+                    )
 
             more_iters = self.args.optimize_intrinsics or self.args.optimize_rig_rotation
             if self.depth_model is not None:

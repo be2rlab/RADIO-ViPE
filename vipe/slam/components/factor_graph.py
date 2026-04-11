@@ -21,6 +21,7 @@
 # /vipe/slam/components/factor_graph.py
 
 import warnings
+import logging
 
 import numpy as np
 import rerun as rr
@@ -39,6 +40,7 @@ from vipe.utils.profiler import profile_function, profiler_section
 
 # Disable all future warnings (mainly torch.cuda.amp related)
 warnings.simplefilter(action="ignore", category=FutureWarning)
+logger = logging.getLogger(__name__)
 
 
 class FactorGraph:
@@ -303,7 +305,7 @@ class FactorGraph:
                 target = rearrange(target, "1 k h w c -> k (h w) c", c=2, h=ht, w=wd)
                 weight = rearrange(weight, "1 k h w c -> k (h w) c", c=2, h=ht, w=wd)
 
-                self.buffer.bundle_adjustment(
+                energy = self.buffer.bundle_adjustment(
                     target=target, weight=weight, disp_damping=self.damping,
                     ii=ii, jj=jj, t0=t0, t1=t1 if not fixed_motion else t0,
                     n_iters=itrs, pose_damping=1e-3, pose_ep=0.1,
@@ -313,7 +315,7 @@ class FactorGraph:
                 )
 
         self.age += 1
-        return delta_norm
+        return delta_norm, energy
 
     @torch.amp.autocast("cuda", enabled=False)
     def update_batch(

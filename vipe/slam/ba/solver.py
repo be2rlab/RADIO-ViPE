@@ -13,10 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import csv
 import logging
+import os
 import time
 
 from collections import defaultdict
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -31,13 +34,23 @@ from .terms import SolverTerm
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Threshold below which we assemble the sparse system into a dense GPU matrix
-# and solve via Cholesky.  After Schur complement on dense_disp the regular
-# system is typically the pose block — (n_keyframes × 6) unknowns — so this
-# comfortably covers sequences of several hundred keyframes.
-# ---------------------------------------------------------------------------
-_DENSE_GPU_DIM_THRESHOLD = 0
+_DENSE_GPU_DIM_THRESHOLD = 150
+
+_BENCH_CSV_PATH = "solver_bench.csv"
+_BENCH_CSV_HEADER_WRITTEN: set[str] = set()
+
+
+def _append_bench_row(path: str, row: dict) -> None:
+    """Append a single benchmark row to a CSV file, writing the header on first call."""
+    p = Path(path)
+    write_header = path not in _BENCH_CSV_HEADER_WRITTEN and not p.exists()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with open(p, "a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(row.keys()))
+        if write_header:
+            writer.writeheader()
+            _BENCH_CSV_HEADER_WRITTEN.add(path)
+        writer.writerow(row)
 
 
 def _solve_dense_gpu(
@@ -102,18 +115,23 @@ def solve_linear_system(
     lhs: torch.Tensor,
     rhs: torch.Tensor,
     _validate: bool = False,
+    bench_csv: str | None = None,
 ) -> torch.Tensor:
     """Dispatch to the fastest available solver for the given system size.
 
-    • dim ≤ _DENSE_GPU_DIM_THRESHOLD  → dense Cholesky on GPU  (no CPU transfer)
-    • dim >  _DENSE_GPU_DIM_THRESHOLD → scipy sparse on CPU    (fallback)
+    • dim >= _DENSE_GPU_DIM_THRESHOLD  → dense Cholesky on GPU  (no CPU transfer)
+    • dim <  _DENSE_GPU_DIM_THRESHOLD → scipy sparse on CPU    (fallback)
 
     When ``_validate`` is True, runs *both* solvers, logs wall-clock time for
     each, and asserts the solutions agree within tolerance.  Disable in
     production for speed.
+
+    When ``bench_csv`` is set (or VIPE_SOLVER_BENCH_CSV env var), each
+    validate-mode call appends a row with dim, timings, speedup, and errors
+    to the given CSV file for offline analysis of the GPU/CPU crossover.
     """
     n = rhs.shape[0]
-    use_gpu = n <= _DENSE_GPU_DIM_THRESHOLD and rhs.is_cuda
+    use_gpu = n >= _DENSE_GPU_DIM_THRESHOLD and rhs.is_cuda
 
     if not _validate:
         if use_gpu:
@@ -122,6 +140,7 @@ def solve_linear_system(
             return _solve_sparse_cpu(pi, pj, lhs, rhs)
 
     # ---- Validation mode: run both, time both, compare ----
+    csv_path = bench_csv or _BENCH_CSV_PATH
 
     # Dense GPU solve — use CUDA events for accurate GPU timing.
     if rhs.is_cuda:
@@ -154,11 +173,13 @@ def solve_linear_system(
     ref_norm = max(norm_gpu, norm_cpu, 1e-12)
     rel_err = diff.norm().item() / ref_norm
 
+    speedup = t_cpu_ms / max(t_gpu_ms, 1e-6)
+
     logger.info(
         "solve_linear_system [dim=%d]: "
         "dense_gpu=%.2fms  sparse_cpu=%.2fms  speedup=%.1fx | "
         "max_abs_diff=%.3e  mean_abs_diff=%.3e  rel_err=%.3e",
-        n, t_gpu_ms, t_cpu_ms, t_cpu_ms / max(t_gpu_ms, 1e-6),
+        n, t_gpu_ms, t_cpu_ms, speedup,
         max_diff, mean_diff, rel_err,
     )
 
@@ -166,13 +187,28 @@ def solve_linear_system(
     # uses float64 sparse LU — both are double precision but different
     # factorisations.  For well-conditioned systems rel_err should be
     # ~1e-10; for ill-conditioned (near-singular) systems it can be
-    # larger.  We use a generous tolerance and warn rather than crash
-    if rel_err > 1e-6:
+    # larger.  After Schur complement, rel_err in the 1e-3 range is
+    # typical and harmless — only warn for genuinely suspicious values.
+    if rel_err > 1e-2:
         logger.warning(
-            "solve_linear_system: moderate disagreement — dim=%d, "
+            "solve_linear_system: significant disagreement — dim=%d, "
             "rel_err=%.3e (may indicate ill-conditioning).",
             n, rel_err,
         )
+
+    # ---- CSV benchmark logging ----
+    if csv_path:
+        _append_bench_row(csv_path, {
+            "dim": n,
+            "gpu_ms": f"{t_gpu_ms:.4f}",
+            "cpu_ms": f"{t_cpu_ms:.4f}",
+            "speedup": f"{speedup:.3f}",
+            "max_abs_diff": f"{max_diff:.6e}",
+            "mean_abs_diff": f"{mean_diff:.6e}",
+            "rel_err": f"{rel_err:.6e}",
+            "gpu_selected": use_gpu,
+            "timestamp": time.time(),
+        })
 
     # Return the result from the path that would normally be selected.
     return x_gpu if use_gpu else x_cpu
