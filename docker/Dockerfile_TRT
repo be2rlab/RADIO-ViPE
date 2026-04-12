@@ -1,0 +1,42 @@
+FROM nvcr.io/nvidia/pytorch:25.02-py3 AS base
+SHELL [ "/bin/bash", "-c" ]
+ENV DEBIAN_FRONTEND=noninteractive
+ENV USER=user
+
+RUN apt-get update && apt-get install -y --no-install-recommends ubuntu-keyring && \
+    apt-get autoclean
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        gnupg2 ca-certificates ubuntu-keyring curl \
+        sudo git wget nano unzip ffmpeg libsm6 libxext6 ninja-build cmake build-essential libopenblas-dev \
+        xterm xauth openssh-server tmux mate-desktop-environment-core \
+        libglvnd0 libgl1 libglx0 libegl1 libx11-6 \
+        libxkbcommon-x11-0 libxkbcommon0 libx11-xcb1 libxcb1 libxcb-render0 libxcb-shape0 libxcb-xfixes0 \
+        libvulkan1 libeigen3-dev zlib1g-dev && \
+    rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
+
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=graphics,utility,compute
+ENV QT_X11_NO_MITSHM=1
+
+# RUN git clone https://github.com/facebookresearch/dinov3.git /home/${USER}/dinov3
+
+COPY ../envs/ envs/
+RUN pip install -r envs/requirements.txt
+
+RUN pip install scikit-learn
+RUN pip install ftfy regex tqdm
+RUN pip install "numpy<2" "opencv-python<5" --force-reinstall
+
+# TensorRT
+RUN pip install torch-tensorrt --no-deps
+RUN pip install git+https://github.com/NVIDIA-AI-IOT/torch2trt.git --no-deps
+
+RUN pip install ultralytics \
+                segment-anything-py \
+                open-clip-torch \
+                transformers==4.52
+
+WORKDIR /home/${USER}/km-vipe
+CMD ["/bin/bash"]

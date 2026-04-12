@@ -184,3 +184,7 @@ tum_results
 aria_results/
 **.pt
 experiments/*
+trt_artifacts/
+replica_results_*/
+tum_results_*/
+vipe_results_scannet/

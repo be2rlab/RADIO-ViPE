@@ -1,5 +1,5 @@
 defaults:
-  - /slam: replica
+  - /slam: scannet
 
 instance: vipe.pipeline.default.DefaultAnnotationPipeline
 
@@ -7,7 +7,6 @@ instance: vipe.pipeline.default.DefaultAnnotationPipeline
 init:
   camera_type: "pinhole"
   intrinsics: "geocalib"
-  intrinsics_path: "/data/Replica/cam_params.json"
   instance: null
     # kf_gap_sec: 2.0
     # phrases: 
@@ -16,17 +15,15 @@ init:
 
 slam:
   keyframe_depth: unidepth-l
-  optimize_intrinsics: ${eq:${..init.intrinsics},"geocalib"}
+  optimize_intrinsics: ${neq:${..init.intrinsics},"gt"}
   visualize: true
   model_family: "radseg"
   model_variant: "c-radio_v3-b"
   radseg_lang_model: "siglip2"
   radseg_slide_crop: 336
   radseg_slide_stride: 224
-  radseg_lang_align: False
-  pca_dim: 256
-  pca_state_path: "/home/user/km-vipe/vipe_results/vipe/pca_basis.pt"
-
+  radseg_lang_align: True
+  pca_dim: null
 
 # Post-processing configs
 post:

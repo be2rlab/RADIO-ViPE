@@ -2,8 +2,8 @@
 
 export ROOT_DIR=/home/user/km-vipe
 export GT_FOLDER=/data/tum
-export RESULTS_FOLDER=$ROOT_DIR/tum_results
-export CUDA_VISIBLE_DEVICES=1
+export RESULTS_FOLDER=$ROOT_DIR/tum_results_baseline
+export CUDA_VISIBLE_DEVICES=0
 export SCENE_NAMES=(
     # rgbd_dataset_freiburg1_360
     # rgbd_dataset_freiburg1_desk
@@ -28,6 +28,7 @@ export SCENE_NAMES=(
 for SCENE_NAME in ${SCENE_NAMES[*]}
 do
     printf "Running scene:   %s\n" "$SCENE_NAME"
+    mkdir -p $RESULTS_FOLDER/profiling
 
     CUDA_VISIBLE_DEVICES=1 CUDA_LAUNCH_BLOCKING=1 python3 $ROOT_DIR/run.py \
         pipeline=tum \
@@ -36,6 +37,7 @@ do
         streams.scene_name=$SCENE_NAME \
         pipeline.output.save_artifacts=true \
         pipeline.output.path=$RESULTS_FOLDER \
+        profiler.output=$RESULTS_FOLDER/profiling/${SCENE_NAME}.txt
         # pipeline.slam.dataset.sequence_name=$SCENE_NAME \
         # pipeline.slam.keyframe_depth=dataset \
 
