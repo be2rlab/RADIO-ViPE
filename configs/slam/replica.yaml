@@ -47,14 +47,14 @@ visualize: false
 # Use keyframe depth for recovering metric depth
 keyframe_depth: metric3d-small
 use_semantic_flow_init: true
-
+pca_state_path: "/home/user/km-vipe/vipe_results/vipe/pca_basis.pt"
 
 sequence_name: room0
 
 ba:
   dense_disp_alpha: 0.001
-  embedding_weight: 0.001
-  use_semantic_kernel: true
+  embedding_weight: 0.000
+  use_semantic_kernel: false
   # embedding_fine_iters: 4  # number of final BA iterations that include embedding term
   embedding_debug:
     enabled: false
@@ -73,9 +73,9 @@ embedding_covisibility:
   weight: 5.0
 
 loop_closure:
-  enabled: true
-  similarity_thresh: 0.80
-  min_interval: 15
+  enabled: false
+  similarity_thresh: 0.85
+  min_interval: 20
   max_candidates: 3
   pose_graph_steps: 2
   pose_graph_iters: 4
