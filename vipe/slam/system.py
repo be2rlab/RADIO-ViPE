@@ -152,7 +152,8 @@ class SLAMSystem:
         # model_family: DinoBackboneFamily = DinoBackboneFamily.DINOV2
         # model_variant: str | DinoV3Variant | DinoV2Variant = DinoV2Variant.VITB_REG
         weights_dir = "/home/user/km-vipe/weights/dinov2"
-        self.pca_state_path = Path(f"/home/user/km-vipe/vipe_results/vipe/{self.config.sequence_name}_pca_basis.pt")
+        self.pca_state_path = Path(self.config.pca_state_path)
+        print(f"pca path is {self.pca_state_path}")
         self._pca_state_saved = False
         print(f"model_family: {self.config.model_family}, model_variant: {self.config.model_variant}")
         self.embedder = EmbeddingsPipeline(

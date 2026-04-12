@@ -2,17 +2,17 @@
 
 export ROOT_DIR=/home/user/km-vipe
 export GT_FOLDER=/data/Replica
-export RESULTS_FOLDER=$ROOT_DIR/vipe_results
+export RESULTS_FOLDER=$ROOT_DIR/replica_results_master_test
 export CUDA_VISIBLE_DEVICES=1
 export SCENE_NAMES=(
     room0
-    room1
-    room2 
-    office0
-    office1
-    office2
-    office3
-    office4
+    # room1
+    # room2 
+    # office0
+    # office1
+    # office2
+    # office3
+    # office4
 )
 
 for SCENE_NAME in ${SCENE_NAMES[*]}
@@ -27,6 +27,7 @@ do
         pipeline.output.save_artifacts=true \
         pipeline.output.path=$RESULTS_FOLDER \
         pipeline.slam.sequence_name=$SCENE_NAME \
+        pipeline.slam.pca_state_path=$RESULTS_FOLDER/vipe/${SCENE_NAME}_pca_basis.pt
 
 
     python $ROOT_DIR/scripts/rmse_evaluation.py \
