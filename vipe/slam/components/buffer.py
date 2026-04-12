@@ -483,6 +483,30 @@ class GraphBuffer:
                 ).mean(dim=-1)
                 embedding_weight_map = embedding_weight * per_pixel_weight
 
+            if self.embeddings is not None and embedding_weight > 0.0:
+                embedding_term = EmbeddingSimilarityTerm(
+                    pose_i_inds=pi,
+                    pose_j_inds=pj,
+                    rig_i_inds=qi,
+                    rig_j_inds=qj,
+                    dense_disp_i_inds=di,
+                    dense_disp_j_inds=dj,
+                    embeddings=self.flattened_embeddings,
+                    embedding_valid_mask=embedding_valid,
+                    weight=embedding_weight_map,
+                    intrinsics=None,
+                    intrinsics_factor=8.0,
+                    rig=None,
+                    image_size=(self.height // 8, self.width // 8),
+                    camera_type=self.camera_type,
+                    debug_options=self.embedding_debug_options,
+                )
+                solver.add_term(embedding_term)
+                raw_fine_iters = getattr(self.ba_config, "embedding_fine_iters", None)
+                embedding_fine_iters_cfg = n_iters if raw_fine_iters in (None, "null") else int(raw_fine_iters)
+                embedding_fine_iters = n_iters if embedding_fine_iters_cfg <= 0 else min(embedding_fine_iters_cfg, n_iters)
+                embedding_term_activation_iter = max(0, n_iters - embedding_fine_iters)
+
             solver.add_term(
                 DenseDepthFlowTerm(
                     pose_i_inds=pi,
@@ -511,30 +535,6 @@ class GraphBuffer:
                     alpha_dynamic=alpha_dynamic,
                 ), AdaptiveBarronRobustKernel()
             )
-
-            if self.embeddings is not None and embedding_weight > 0.0:
-                embedding_term = EmbeddingSimilarityTerm(
-                    pose_i_inds=pi,
-                    pose_j_inds=pj,
-                    rig_i_inds=qi,
-                    rig_j_inds=qj,
-                    dense_disp_i_inds=di,
-                    dense_disp_j_inds=dj,
-                    embeddings=self.flattened_embeddings,
-                    embedding_valid_mask=embedding_valid,
-                    weight=embedding_weight_map,
-                    intrinsics=None,
-                    intrinsics_factor=8.0,
-                    rig=None,
-                    image_size=(self.height // 8, self.width // 8),
-                    camera_type=self.camera_type,
-                    debug_options=self.embedding_debug_options,
-                )
-                solver.add_term(embedding_term)
-                raw_fine_iters = getattr(self.ba_config, "embedding_fine_iters", None)
-                embedding_fine_iters_cfg = n_iters if raw_fine_iters in (None, "null") else int(raw_fine_iters)
-                embedding_fine_iters = n_iters if embedding_fine_iters_cfg <= 0 else min(embedding_fine_iters_cfg, n_iters)
-                embedding_term_activation_iter = max(0, n_iters - embedding_fine_iters)
 
             if self.sparse_tracks.enabled:
                 # This does not support cross-view tracking yet.
@@ -644,7 +644,7 @@ class GraphBuffer:
                 ba_energy.append(cur_energy)
                 if verbose:
                     logger.info(f"BA iters = {n_iters}, energy: {ba_energy[0]} -> {ba_energy[-1]}")
-                if best_energy is None or cur_energy < best_energy - 1e-6 * abs(best_energy):
+                if best_energy is None or cur_energy < best_energy - 1e-5 * abs(best_energy):
                     best_energy = cur_energy
                     stall_count = 0
                 else:

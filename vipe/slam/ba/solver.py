@@ -28,7 +28,7 @@ from ..maths.matrix import SparseBlockMatrixDict, SparseMatrixSubview, SparseNul
 from ..maths.retractor import BaseRetractor
 from ..maths.vector import SparseBlockVector, SparseNullVector, SparseVectorDict, SparseVectorSubview
 from .kernel import RobustKernel
-from .terms import SolverTerm
+from .terms import SolverTerm, SharedProjectionCache
 
 
 logger = logging.getLogger(__name__)
@@ -297,6 +297,7 @@ class Solver:
         rhs: SparseVectorDict = defaultdict(SparseNullVector)
 
         fully_fixed_groups = {t for t, inds in self.group_fixed_inds.items() if inds is None}
+        shared_cache = SharedProjectionCache() 
 
         energy = 0.0
         for term, kernel in zip(self.terms, self.kernels):
@@ -304,7 +305,7 @@ class Solver:
             term.update(self)
             if not term.is_active():
                 continue
-            term_return = term.forward(variables, jacobian=True)
+            term_return = term.forward(variables, jacobian=True, shared_cache=shared_cache)
             term_group_names = list(term.group_names().difference(fully_fixed_groups))
 
             if kernel is not None:

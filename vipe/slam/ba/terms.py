@@ -24,6 +24,20 @@ from .kernel import RobustKernel
 
 logger = logging.getLogger(__name__)
 
+@dataclass
+class SharedProjectionCache:
+    """Shared between DenseDepthFlowTerm and EmbeddingSimilarityTerm."""
+    coords: torch.Tensor | None = None 
+    valid: torch.Tensor | None = None
+    Ji: torch.Tensor | None = None
+    Jj: torch.Tensor | None = None
+    Jz: torch.Tensor | None = None
+    Jfi: torch.Tensor | None = None
+    Jfj: torch.Tensor | None = None
+    Jri: torch.Tensor | None = None
+    Jrj: torch.Tensor | None = None
+    all_cs: torch.Tensor | None = None  # (n_terms, H*W) cosine similarities
+
 
 class TermEvalReturn(ABC):
     @abstractmethod
@@ -77,7 +91,7 @@ class ConcreteTermEvalReturn(TermEvalReturn):
 
 class SolverTerm(ABC):
     @abstractmethod
-    def forward(self, variables: dict[str, Any], jacobian: bool = True) -> TermEvalReturn: ...
+    def forward(self, variables: dict[str, Any], jacobian: bool = True, shared_cache: SharedProjectionCache | None = None) -> TermEvalReturn: ...
 
     @abstractmethod
     def group_names(self) -> set[str]: ...
@@ -119,7 +133,7 @@ class DenseDepthFlowTerm(SolverTerm):
         embeddings: torch.Tensor,
         embedding_weight: torch.Tensor | float,
         embedding_valid_mask: torch.Tensor | None = None,
-        chunk_size: int = 4,
+        chunk_size: int = 16,
         residual_scale: float = 1.0,
         use_photometric_residual: bool = False,
         debug_options: dict[str, Any] | None = None,
@@ -221,7 +235,7 @@ class DenseDepthFlowTerm(SolverTerm):
             names.add("rig")
         return names
 
-    def forward(self, variables: dict[str, Any], jacobian: bool = True) -> TermEvalReturn:
+    def forward(self, variables: dict[str, Any], jacobian: bool = True, shared_cache: SharedProjectionCache | None = None) -> TermEvalReturn:
         """
         variables contain:
             - pose: (n_var, ) SE3 of poses
@@ -245,23 +259,37 @@ class DenseDepthFlowTerm(SolverTerm):
         assert intrinsics.shape[0] == rig.shape[0]
 
         camera_model_cls = self.camera_type.camera_model_cls()
+        if shared_cache is not None and shared_cache.coords is not None:
+            # Reuse projection from DenseDepthFlowTerm — skip iproj_i_proj_j_disp entirely
+            coords = shared_cache.coords
+            valid = shared_cache.valid
+            Ji, Jj, Jz = shared_cache.Ji, shared_cache.Jj, shared_cache.Jz
+            Jfi, Jfj = shared_cache.Jfi, shared_cache.Jfj
+            Jri, Jrj = shared_cache.Jri, shared_cache.Jrj
+        else:  
+            coords, valid, (Ji, Jj, Jz), (Jfi, Jfj), (Jri, Jrj) = geom.iproj_i_proj_j_disp(
+                pose,
+                dense_disp.view(-1, self.image_size[0], self.image_size[1]),
+                None,
+                (camera_model_cls(intrinsics).scaled(1.0 / self.intrinsics_factor).intrinsics),
+                self.camera_type,
+                rig,
+                self.pose_i_inds,
+                self.pose_j_inds,
+                self.rig_i_inds,
+                self.rig_j_inds,
+                self.dense_disp_i_inds,
+                jacobian_p_d=jacobian,
+                jacobian_f=jacobian and optimize_intrinsics,
+                jacobian_r=jacobian and optimize_rig,
+            )
+            if shared_cache is not None:
+                shared_cache.coords = coords
+                shared_cache.valid = valid
+                shared_cache.Ji = Ji; shared_cache.Jj = Jj; shared_cache.Jz = Jz
+                shared_cache.Jfi = Jfi; shared_cache.Jfj = Jfj
+                shared_cache.Jri = Jri; shared_cache.Jrj = Jrj
 
-        coords, valid, (Ji, Jj, Jz), (Jfi, Jfj), (Jri, Jrj) = geom.iproj_i_proj_j_disp(
-            pose,
-            dense_disp.view(-1, self.image_size[0], self.image_size[1]),
-            None,
-            (camera_model_cls(intrinsics).scaled(1.0 / self.intrinsics_factor).intrinsics),
-            self.camera_type,
-            rig,
-            self.pose_i_inds,
-            self.pose_j_inds,
-            self.rig_i_inds,
-            self.rig_j_inds,
-            self.dense_disp_i_inds,
-            jacobian_p_d=jacobian,
-            jacobian_f=jacobian and optimize_intrinsics,
-            jacobian_r=jacobian and optimize_rig,
-        )
         coords = rearrange(coords, "n h w c -> n (h w) c", c=2)
         weight = rearrange(valid, "n h w 1 -> n (h w) 1") * self.weight  # (n_terms, H*W, 2)
         weight = rearrange(weight, "n hw c -> n (hw c)", c=2)
@@ -306,10 +334,14 @@ class DenseDepthFlowTerm(SolverTerm):
                     j_inds=torch.cat([self.rig_i_inds, self.rig_j_inds]),
                     data=torch.cat([Jri, Jrj], dim=0),
                 )
+
         if self.embeddings is not None and self.use_semantic_kernel:
             if self.use_temporal_stability:
                 # compute temporal stability field and derive per-edge alpha
-                all_cs = self._compute_all_cosine_sims(coords, valid, self.device)
+                if shared_cache is not None and shared_cache.all_cs is not None:
+                    all_cs = shared_cache.all_cs
+                else:
+                    all_cs = self._compute_all_cosine_sims(coords, valid, self.device)
                 self.alpha = self._compute_temporal_alpha(all_cs)
             else:
                 # original pairwise sigmoid path (ablation fallback)
@@ -379,9 +411,8 @@ class DenseDepthFlowTerm(SolverTerm):
             if not torch.any(valid_map.view(-1, pixel_count).sum(dim=1) > 0.0):
                 continue
             # Bilinear sample raw target features (and spatial grads if needed)
-            target_raw_sampled, _, _ = self.bilinear_sample_with_grad(
-                target_raw_full, coords_chunk, return_grad=False
-            )
+            grid = coords_chunk * 2.0 / torch.tensor([self.width - 1, self.height - 1], device=device) - 1.0
+            target_raw_sampled = F.grid_sample(target_raw_full, grid, mode='bilinear', padding_mode='border', align_corners=True)
             # Residual only path
             eps = 1e-8
             u = target_raw_sampled
@@ -461,11 +492,9 @@ class DenseDepthFlowTerm(SolverTerm):
 
             if not torch.any(valid_map.view(-1, pixel_count).sum(dim=1) > 0.0):
                 continue
-
-            target_raw_sampled, _, _ = self.bilinear_sample_with_grad(
-                target_raw_full, coords_chunk, return_grad=False
-            )
-
+            
+            grid = coords_chunk * 2.0 / torch.tensor([self.width - 1, self.height - 1], device=device) - 1.0
+            target_raw_sampled = F.grid_sample(target_raw_full, grid, mode='bilinear', padding_mode='border', align_corners=True)
             u = target_raw_sampled
             u_norm = u.norm(dim=1, keepdim=True).clamp_min(1e-8)
             t_norm = u / u_norm
@@ -931,10 +960,10 @@ class EmbeddingSimilarityTerm(SolverTerm):
         idx_01 = (y1_int * Wf + x0_int).view(N, 1, -1).expand(-1, C, -1)
         idx_11 = (y1_int * Wf + x1_int).view(N, 1, -1).expand(-1, C, -1)
 
-        F00 = torch.gather(flat_features, 2, idx_00).view(N, C, Hc, Wc)
-        F10 = torch.gather(flat_features, 2, idx_10).view(N, C, Hc, Wc)
-        F01 = torch.gather(flat_features, 2, idx_01).view(N, C, Hc, Wc)
-        F11 = torch.gather(flat_features, 2, idx_11).view(N, C, Hc, Wc)
+        idx_all = torch.stack([idx_00, idx_10, idx_01, idx_11], dim=0)       # (4, N, C, H*W)
+        flat_exp = flat_features.unsqueeze(0).expand(4, -1, -1, -1)          # (4, N, C, H*W)
+        F_all = torch.gather(flat_exp, 3, idx_all).view(4, N, C, Hc, Wc)    # single kernel launch
+        F00, F10, F01, F11 = F_all[0], F_all[1], F_all[2], F_all[3]
 
         du_exp = du.unsqueeze(1)
         dv_exp = dv.unsqueeze(1)
@@ -960,7 +989,7 @@ class EmbeddingSimilarityTerm(SolverTerm):
         grad_u: torch.Tensor,  # (N, C, H, W)
         grad_v: torch.Tensor,  # (N, C, H, W)
         valid_map: torch.Tensor,  # (N, 1, H, W)
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Compute residual and gradients w.r.t. image coordinates, accounting for
         normalization after sampling of the target features.
@@ -1005,9 +1034,9 @@ class EmbeddingSimilarityTerm(SolverTerm):
         grad_v_weighted = (grad_u_feat * grad_v).sum(dim=1)  # (N, H, W)
         grad_coords = torch.stack([grad_u_weighted, grad_v_weighted], dim=-1)  # (N, H, W, 2)
 
-        return residual, grad_coords
+        return residual, grad_coords, cos_sim
 
-    def forward(self, variables: dict[str, Any], jacobian: bool = True) -> TermEvalReturn:
+    def forward(self, variables: dict[str, Any], jacobian: bool = True, shared_cache: SharedProjectionCache | None = None) -> TermEvalReturn:
         self._forward_calls += 1
         pose, dense_disp = variables["pose"], variables["dense_disp"]
 
@@ -1033,22 +1062,36 @@ class EmbeddingSimilarityTerm(SolverTerm):
             else 1.0
         )
 
-        coords, valid, (Ji, Jj, Jz), (Jfi, Jfj), (Jri, Jrj) = geom.iproj_i_proj_j_disp(
-            pose,
-            dense_disp.view(-1, self.height, self.width),
-            None,
-            (camera_model_cls(intrinsics).scaled(scale).intrinsics),
-            self.camera_type,
-            rig,
-            self.pose_i_inds,
-            self.pose_j_inds,
-            self.rig_i_inds,
-            self.rig_j_inds,
-            self.dense_disp_i_inds,
-            jacobian_p_d=jacobian,
-            jacobian_f=jacobian and optimize_intrinsics,
-            jacobian_r=jacobian and optimize_rig,
-        )
+        if shared_cache is not None and shared_cache.coords is not None:
+            coords = shared_cache.coords
+            valid = shared_cache.valid
+            Ji, Jj, Jz = shared_cache.Ji, shared_cache.Jj, shared_cache.Jz
+            Jfi, Jfj = shared_cache.Jfi, shared_cache.Jfj
+            Jri, Jrj = shared_cache.Jri, shared_cache.Jrj
+
+        else:
+            coords, valid, (Ji, Jj, Jz), (Jfi, Jfj), (Jri, Jrj) = geom.iproj_i_proj_j_disp(
+                pose,
+                dense_disp.view(-1, self.height, self.width),
+                None,
+                (camera_model_cls(intrinsics).scaled(scale).intrinsics),
+                self.camera_type,
+                rig,
+                self.pose_i_inds,
+                self.pose_j_inds,
+                self.rig_i_inds,
+                self.rig_j_inds,
+                self.dense_disp_i_inds,
+                jacobian_p_d=jacobian,
+                jacobian_f=jacobian and optimize_intrinsics,
+                jacobian_r=jacobian and optimize_rig,
+            )
+            if shared_cache is not None:
+                shared_cache.coords = coords
+                shared_cache.valid = valid
+                shared_cache.Ji = Ji; shared_cache.Jj = Jj; shared_cache.Jz = Jz
+                shared_cache.Jfi = Jfi; shared_cache.Jfj = Jfj
+                shared_cache.Jri = Jri; shared_cache.Jrj = Jrj
 
         coords = coords.view(self.n_terms, self.height, self.width, 2)
         valid = valid.view(self.n_terms, self.height, self.width, 1)
@@ -1060,6 +1103,7 @@ class EmbeddingSimilarityTerm(SolverTerm):
         # Pre-allocate outputs
         residual = torch.zeros(self.n_terms, pixel_count, device=device, dtype=dtype)
         weight = torch.zeros(self.n_terms, pixel_count, device=device, dtype=dtype)
+        all_cs = torch.zeros(self.n_terms, pixel_count, device=device, dtype=dtype)
 
         if jacobian:
             J_pose_i = torch.zeros(self.n_terms, pixel_count, 6, device=device, dtype=dtype)
@@ -1117,7 +1161,7 @@ class EmbeddingSimilarityTerm(SolverTerm):
             )
 
             if jacobian:
-                residual_chunk, grad_coords = self.compute_residual_and_jacobian(
+                residual_chunk, grad_coords, cos_sim_chunk = self.compute_residual_and_jacobian(
                     source_norm, target_raw_sampled, grad_u, grad_v, valid_map
                 )
             else:
@@ -1126,14 +1170,16 @@ class EmbeddingSimilarityTerm(SolverTerm):
                 u = target_raw_sampled
                 u_norm = u.norm(dim=1, keepdim=True).clamp_min(eps)
                 t_norm = u / u_norm
-                cos_sim = (source_norm * t_norm).sum(dim=1)
+                cos_sim_chunk = (source_norm * t_norm).sum(dim=1)  
+                cos_sim_chunk = cos_sim_chunk * valid_map.squeeze(1) 
                 if self.use_photometric_residual:
-                    residual_chunk = self.residual_scale * torch.sqrt(2.0 * (1.0 - cos_sim).clamp(min=0.0))
+                    residual_chunk = self.residual_scale * torch.sqrt(2.0 * (1.0 - cos_sim_chunk).clamp(min=0.0))
                 else:
-                    residual_chunk = 1.0 - cos_sim
+                    residual_chunk = 1.0 - cos_sim_chunk
                 residual_chunk = residual_chunk * valid_map.squeeze(1)
 
             residual[cs] = residual_chunk.view(-1, pixel_count)
+            all_cs[cs] = cos_sim_chunk.view(-1, pixel_count)  
 
             if self.debug_visualize:
                 self._maybe_visualize_chunk(
@@ -1171,6 +1217,10 @@ class EmbeddingSimilarityTerm(SolverTerm):
                     Jrj_chunk = Jrj[cs].view(-1, pixel_count, 2, 6)
                     J_rig[cs] = torch.einsum("nkd,nkdf->nkf", grad_coords_flat, Jri_chunk)
                     J_rig[cs_offset] = torch.einsum("nkd,nkdf->nkf", grad_coords_flat, Jrj_chunk)
+        
+        # write cos-sim to cache
+        if shared_cache is not None:
+            shared_cache.all_cs = all_cs
 
         # Assemble sparse Jacobians
         J_dict = {}
@@ -1598,7 +1648,7 @@ class DispSensRegularizationTerm(SolverTerm):
     def group_names(self) -> set[str]:
         return {"dense_disp"}
 
-    def forward(self, variables: dict[str, Any], jacobian: bool = True) -> TermEvalReturn:
+    def forward(self, variables: dict[str, Any], jacobian: bool = True, shared_cache: SharedProjectionCache | None = None) -> TermEvalReturn:
         """
         variables contain:
             - dense_disp: (n_var, H*W) tensor of disparities
@@ -1674,7 +1724,7 @@ class TracksFlowTerm(SolverTerm):
             names.add("intrinsics")
         return names
 
-    def forward(self, variables: dict[str, Any], jacobian: bool = True) -> TermEvalReturn:
+    def forward(self, variables: dict[str, Any], jacobian: bool = True, shared_cache: SharedProjectionCache | None = None) -> TermEvalReturn:
         """
         variables contain:
             - pose: (n_var, ) SE3 of poses

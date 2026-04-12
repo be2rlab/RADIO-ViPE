@@ -426,6 +426,16 @@ class SLAMSystem:
         with profiler_section("slam.extract_map"):
             slam_map = self.buffer.extract_slam_map(filter_thresh=self.config.map_filter_thresh)
 
+
+        self.buffer.embeddings = None
+        self.buffer.embedding_valid_mask = None
+        self.buffer.embedding_dim = None
+        self.buffer.embedding_resolution = None
+        if self.embedder is not None:
+            del self.embedder
+            self.embedder = None
+        torch.cuda.empty_cache()
+
         # Scale back the intrinsics to the original size.
         with profiler_section("slam.recover_intrinsics"):
             original_intrinsics = torch.stack(
