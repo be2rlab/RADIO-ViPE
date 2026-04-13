@@ -129,11 +129,13 @@ class DenseDepthFlowTerm(SolverTerm):
         rig: SE3 | None,
         image_size: tuple[int, int],
         camera_type: CameraType,
-        dense_disp_j_inds: torch.Tensor,
-        embeddings: torch.Tensor,
-        embedding_weight: torch.Tensor | float,
+        dense_disp_j_inds: torch.Tensor | None = None,
+        embedding_i_inds: torch.Tensor | None = None,
+        embedding_j_inds: torch.Tensor | None = None,
+        embeddings: torch.Tensor | None = None,
+        embedding_weight: torch.Tensor | float | None = None,
         embedding_valid_mask: torch.Tensor | None = None,
-        chunk_size: int = 16,
+        chunk_size: int = 32,
         residual_scale: float = 1.0,
         use_photometric_residual: bool = False,
         debug_options: dict[str, Any] | None = None,
@@ -172,6 +174,8 @@ class DenseDepthFlowTerm(SolverTerm):
         self.rig_j_inds = rig_j_inds
         self.dense_disp_i_inds = dense_disp_i_inds
         self.dense_disp_j_inds = dense_disp_j_inds
+        self.embedding_i_inds = embedding_i_inds
+        self.embedding_j_inds = embedding_j_inds
         self.chunk_size = chunk_size
         self.residual_scale = residual_scale
         self.use_photometric_residual = use_photometric_residual
@@ -359,7 +363,7 @@ class DenseDepthFlowTerm(SolverTerm):
         )
     
 
-    def compute_embedding_residuals(self, coords,valid,device) -> TermEvalReturn:
+    def compute_embedding_residuals(self, coords, valid, device) -> TermEvalReturn:
 
         coords = coords.view(self.n_terms, self.height, self.width, 2)
         valid = valid.view(self.n_terms, self.height, self.width, 1)
@@ -371,30 +375,29 @@ class DenseDepthFlowTerm(SolverTerm):
         residual = torch.zeros(self.n_terms, pixel_count, device=device, dtype=dtype)
         weight = torch.zeros(self.n_terms, pixel_count, device=device, dtype=dtype)
 
-
         # Chunk to save memory
         for chunk_start in range(0, self.n_terms, self.chunk_size):
             chunk_end = min(chunk_start + self.chunk_size, self.n_terms)
             cs = slice(chunk_start, chunk_end)
-            cs_offset = slice(chunk_start + self.n_terms, chunk_end + self.n_terms)
 
-            src_idx = self.dense_disp_i_inds[cs]
-            tgt_idx = self.dense_disp_j_inds[cs]
+            # Embedding indices — into the compact staged tensor [0..K)
+            emb_src = self.embedding_i_inds[cs]
+            emb_tgt = self.embedding_j_inds[cs]
 
             # Normalized source (no sampling)
-            source_raw = self.embeddings[src_idx].float() # (N, C, H, W)
-            source_norm = F.normalize(source_raw, dim=1, eps=1e-8)  
+            source_raw = self.embeddings[emb_src].float()  # (N, C, H, W)
+            source_norm = F.normalize(source_raw, dim=1, eps=1e-8)
 
             # Target: raw features (will be normalized AFTER sampling)
-            target_raw_full = self.embeddings[tgt_idx].float()   # (N, C, H, W)
+            target_raw_full = self.embeddings[emb_tgt].float()  # (N, C, H, W)
 
             coords_chunk = coords[cs]  # (N, H, W, 2)
-            valid_chunk = valid[cs]  # (N, H, W, 1)
+            valid_chunk = valid[cs]    # (N, H, W, 1)
 
-            # Optional embedding validity masks (src & tgt)
+            # Optional embedding validity masks — also indexed by embedding indices
             if self.embedding_valid_mask is not None:
-                src_valid = self.embedding_valid_mask[src_idx].unsqueeze(-1)  # (N, H, W, 1)
-                tgt_valid = self.embedding_valid_mask[tgt_idx].unsqueeze(-1)  # (N, H, W, 1)
+                src_valid = self.embedding_valid_mask[emb_src].unsqueeze(-1)  # (N, H, W, 1)
+                tgt_valid = self.embedding_valid_mask[emb_tgt].unsqueeze(-1)  # (N, H, W, 1)
                 valid_chunk = valid_chunk * src_valid * tgt_valid
 
             valid_map = valid_chunk.permute(0, 3, 1, 2)  # (N, 1, H, W)
@@ -410,9 +413,11 @@ class DenseDepthFlowTerm(SolverTerm):
             # Skip if fully invalid
             if not torch.any(valid_map.view(-1, pixel_count).sum(dim=1) > 0.0):
                 continue
-            # Bilinear sample raw target features (and spatial grads if needed)
+
+            # Bilinear sample raw target features
             grid = coords_chunk * 2.0 / torch.tensor([self.width - 1, self.height - 1], device=device) - 1.0
             target_raw_sampled = F.grid_sample(target_raw_full, grid, mode='bilinear', padding_mode='border', align_corners=True)
+
             # Residual only path
             eps = 1e-8
             u = target_raw_sampled
@@ -448,16 +453,8 @@ class DenseDepthFlowTerm(SolverTerm):
     #         x = embedding_residual
     #         self.alpha = (alpha_max - alpha_min) / (1 + torch.exp(-(x - 0.5) / 0.1)) + alpha_min
 
-    # ------------------------------------------------------------------
-    # STEP 1: temporal stability field helpers
-    # ------------------------------------------------------------------
 
-    def _compute_all_cosine_sims(
-        self,
-        coords: torch.Tensor,
-        valid: torch.Tensor,
-        device: str,
-    ) -> torch.Tensor:
+    def _compute_all_cosine_sims(self, coords: torch.Tensor, valid: torch.Tensor, device: str) -> torch.Tensor:
         """
         Compute cosine similarity cs_ij(u) for every edge, returning
         a (n_terms, H*W) tensor.  Valid pixels carry their true similarity;
@@ -473,26 +470,27 @@ class DenseDepthFlowTerm(SolverTerm):
             chunk_end = min(chunk_start + self.chunk_size, self.n_terms)
             cs = slice(chunk_start, chunk_end)
 
-            src_idx = self.dense_disp_i_inds[cs]
-            tgt_idx = self.dense_disp_j_inds[cs]
+            # Embedding indices — into the compact staged tensor [0..K)
+            emb_src = self.embedding_i_inds[cs]
+            emb_tgt = self.embedding_j_inds[cs]
 
-            source_raw = self.embeddings[src_idx].float()
+            source_raw = self.embeddings[emb_src].float()
             source_norm = F.normalize(source_raw, dim=1, eps=1e-8)
-            target_raw_full = self.embeddings[tgt_idx].float()
+            target_raw_full = self.embeddings[emb_tgt].float()
 
             coords_chunk = coords[cs]
             valid_chunk = valid[cs]
 
             if self.embedding_valid_mask is not None:
-                src_valid = self.embedding_valid_mask[src_idx].unsqueeze(-1)
-                tgt_valid = self.embedding_valid_mask[tgt_idx].unsqueeze(-1)
+                src_valid = self.embedding_valid_mask[emb_src].unsqueeze(-1)
+                tgt_valid = self.embedding_valid_mask[emb_tgt].unsqueeze(-1)
                 valid_chunk = valid_chunk * src_valid * tgt_valid
 
             valid_map = valid_chunk.permute(0, 3, 1, 2)  # (N, 1, H, W)
 
             if not torch.any(valid_map.view(-1, pixel_count).sum(dim=1) > 0.0):
                 continue
-            
+
             grid = coords_chunk * 2.0 / torch.tensor([self.width - 1, self.height - 1], device=device) - 1.0
             target_raw_sampled = F.grid_sample(target_raw_full, grid, mode='bilinear', padding_mode='border', align_corners=True)
             u = target_raw_sampled
@@ -830,6 +828,8 @@ class EmbeddingSimilarityTerm(SolverTerm):
         rig_j_inds: torch.Tensor,
         dense_disp_i_inds: torch.Tensor,
         dense_disp_j_inds: torch.Tensor,
+        embedding_i_inds: torch.Tensor,
+        embedding_j_inds: torch.Tensor,
         embeddings: torch.Tensor,
         weight: torch.Tensor | float,
         image_size: tuple[int, int],
@@ -838,7 +838,7 @@ class EmbeddingSimilarityTerm(SolverTerm):
         intrinsics: torch.Tensor | None = None,
         intrinsics_factor: float = 8.0,
         rig: SE3 | None = None,
-        chunk_size: int = 4,
+        chunk_size: int = 32,
         residual_scale: float = 1.0,
         use_photometric_residual: bool = False,
         debug_options: dict[str, Any] | None = None,
@@ -858,6 +858,8 @@ class EmbeddingSimilarityTerm(SolverTerm):
         self.rig_j_inds = rig_j_inds
         self.dense_disp_i_inds = dense_disp_i_inds
         self.dense_disp_j_inds = dense_disp_j_inds
+        self.embedding_i_inds = embedding_i_inds
+        self.embedding_j_inds = embedding_j_inds
         self.camera_type = camera_type
 
         # Store raw embeddings and a pre-normalized copy for the *source* (no sampling on source)
@@ -917,6 +919,35 @@ class EmbeddingSimilarityTerm(SolverTerm):
 
     def is_active(self) -> bool:
         return self._active
+
+
+    @staticmethod
+    def bilinear_sample(
+        features: torch.Tensor, coords: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Bilinear sample using F.grid_sample. Returns samples and the
+        normalized grid (with grad enabled) for later autograd use.
+
+        Args:
+            features: (N, C, H, W) float32
+            coords:   (N, H, W, 2) in pixel (x, y)
+        Returns:
+            samples: (N, C, H, W)
+            grid:    (N, H, W, 2) normalized to [-1,1], requires_grad=True
+        """
+        N, C, Hf, Wf = features.shape
+        grid = torch.empty_like(coords)
+        grid[..., 0] = 2.0 * coords[..., 0] / (Wf - 1) - 1.0
+        grid[..., 1] = 2.0 * coords[..., 1] / (Hf - 1) - 1.0
+        grid = grid.detach().requires_grad_(True)
+
+        with torch.enable_grad():
+            samples = F.grid_sample(
+                features, grid,
+                mode='bilinear', padding_mode='border', align_corners=True,
+            )
+        return samples, grid
 
     @staticmethod
     def bilinear_sample_with_grad(
@@ -984,20 +1015,21 @@ class EmbeddingSimilarityTerm(SolverTerm):
 
     def compute_residual_and_jacobian(
         self,
-        source_norm: torch.Tensor,  # (N, C, H, W), normalized
-        target_raw_sampled: torch.Tensor,  # (N, C, H, W), raw sampled
-        grad_u: torch.Tensor,  # (N, C, H, W)
-        grad_v: torch.Tensor,  # (N, C, H, W)
-        valid_map: torch.Tensor,  # (N, 1, H, W)
+        source_norm: torch.Tensor,       # (N, C, H, W), normalized
+        target_raw_sampled: torch.Tensor, # (N, C, H, W), raw sampled (in autograd graph)
+        grid: torch.Tensor,               # (N, H, W, 2), normalized grid with grad
+        valid_map: torch.Tensor,          # (N, 1, H, W)
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Compute residual and gradients w.r.t. image coordinates, accounting for
-        normalization after sampling of the target features.
+        Compute residual and Jacobian w.r.t. pixel coordinates using autograd
+        through grid_sample, instead of manually computed bilinear gradients.
 
         Returns:
-            residual:   (N, H, W)
-            grad_coords:(N, H, W, 2)
+            residual:    (N, H, W)
+            grad_coords: (N, H, W, 2) in pixel coordinates
+            cos_sim:     (N, H, W)
         """
+        N, C, Hf, Wf = target_raw_sampled.shape
         eps = 1e-8
 
         # Normalize AFTER sampling
@@ -1009,30 +1041,38 @@ class EmbeddingSimilarityTerm(SolverTerm):
         cos_sim = (source_norm * t_norm).sum(dim=1)  # (N, H, W)
 
         if self.use_photometric_residual:
-            # r = s * sqrt(2(1 - c))
-            residual = self.residual_scale * torch.sqrt(2.0 * (1.0 - cos_sim).clamp(min=0.0))
-            # dr/dc = -(s^2)/r
-            grad_scale = -(self.residual_scale**2) / (residual.clamp(min=1e-6) + 1e-8)
+            residual = self.residual_scale * torch.sqrt(
+                2.0 * (1.0 - cos_sim).clamp(min=0.0)
+            )
+            grad_scale = -(self.residual_scale ** 2) / (residual.clamp(min=1e-6) + 1e-8)
         else:
-            # r = 1 - c
             residual = 1.0 - cos_sim
             grad_scale = cos_sim.new_full(cos_sim.shape, -1.0)
 
-        # Mask residuals
         residual = residual * valid_map.squeeze(1)
 
         # d cos / d u = (s - (s·t) t) / ||u||
         proj = source_norm - (cos_sim.unsqueeze(1) * t_norm)  # (N, C, H, W)
         dcos_du = proj / u_norm
 
-        # dr/du = (dr/dc) * (dc/du)
-        grad_u_feat = grad_scale.unsqueeze(1) * dcos_du
-        grad_u_feat = grad_u_feat * valid_map  # mask invalid
+        # dr/du = (dr/dc) * (dc/du), masked
+        grad_u_feat = grad_scale.unsqueeze(1) * dcos_du * valid_map  # (N, C, H, W)
 
-        # Chain to coords via bilinear sampling grads
-        grad_u_weighted = (grad_u_feat * grad_u).sum(dim=1)  # (N, H, W)
-        grad_v_weighted = (grad_u_feat * grad_v).sum(dim=1)  # (N, H, W)
-        grad_coords = torch.stack([grad_u_weighted, grad_v_weighted], dim=-1)  # (N, H, W, 2)
+        # Single backward through grid_sample: computes
+        #   sum_c(grad_u_feat[n,c,h,w] * d(samples[n,c,h,w])/d(grid[n,h,w,:]))
+        # which is exactly the coord Jacobian we need.
+        with torch.enable_grad():
+            grad_grid = torch.autograd.grad(
+                outputs=target_raw_sampled,
+                inputs=grid,
+                grad_outputs=grad_u_feat,
+                create_graph=False,
+            )[0]# (N, H, W, 2) in normalized grid space
+
+        # Convert from grid coords [-1,1] back to pixel coords
+        grad_coords = torch.empty_like(grad_grid)
+        grad_coords[..., 0] = grad_grid[..., 0] * 2.0 / (Wf - 1)
+        grad_coords[..., 1] = grad_grid[..., 1] * 2.0 / (Hf - 1)
 
         return residual, grad_coords, cos_sim
 
@@ -1125,20 +1165,18 @@ class EmbeddingSimilarityTerm(SolverTerm):
             src_idx = self.dense_disp_i_inds[cs]
             tgt_idx = self.dense_disp_j_inds[cs]
 
-            # Normalized source (no sampling)
-            source_raw = self.embeddings[src_idx].float() # (N, C, H, W)
-            source_norm = F.normalize(source_raw, dim=1, eps=1e-8)  
+            emb_src = self.embedding_i_inds[cs]
+            emb_tgt = self.embedding_j_inds[cs]
 
-            # Target: raw features (will be normalized AFTER sampling)
-            target_raw_full = self.embeddings[tgt_idx].float()  # (N, C, H, W)
+            source_raw = self.embeddings[emb_src].float()
+            target_raw_full = self.embeddings[emb_tgt].float()
+            source_norm = F.normalize(source_raw, dim=1, eps=1e-8)     
+            coords_chunk = coords[cs]       
+            valid_chunk = valid[cs]     
 
-            coords_chunk = coords[cs]  # (N, H, W, 2)
-            valid_chunk = valid[cs]  # (N, H, W, 1)
-
-            # Optional embedding validity masks (src & tgt)
             if self.embedding_valid_mask is not None:
-                src_valid = self.embedding_valid_mask[src_idx].unsqueeze(-1)  # (N, H, W, 1)
-                tgt_valid = self.embedding_valid_mask[tgt_idx].unsqueeze(-1)  # (N, H, W, 1)
+                src_valid = self.embedding_valid_mask[emb_src].unsqueeze(-1)
+                tgt_valid = self.embedding_valid_mask[emb_tgt].unsqueeze(-1)
                 valid_chunk = valid_chunk * src_valid * tgt_valid
 
             valid_map = valid_chunk.permute(0, 3, 1, 2)  # (N, 1, H, W)
@@ -1156,13 +1194,15 @@ class EmbeddingSimilarityTerm(SolverTerm):
                 continue
 
             # Bilinear sample raw target features (and spatial grads if needed)
-            target_raw_sampled, grad_u, grad_v = self.bilinear_sample_with_grad(
-                target_raw_full, coords_chunk, return_grad=jacobian
-            )
+            # target_raw_sampled, grad_u, grad_v = self.bilinear_sample_with_grad(
+            #     target_raw_full, coords_chunk, return_grad=jacobian
+            # )
+
+            target_raw_sampled, grid = self.bilinear_sample(target_raw_full, coords_chunk)
 
             if jacobian:
                 residual_chunk, grad_coords, cos_sim_chunk = self.compute_residual_and_jacobian(
-                    source_norm, target_raw_sampled, grad_u, grad_v, valid_map
+                    source_norm, target_raw_sampled, grid, valid_map
                 )
             else:
                 # Residual only path

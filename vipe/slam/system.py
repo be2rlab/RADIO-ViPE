@@ -259,11 +259,13 @@ class SLAMSystem:
 
         if (
             self.loop_closure is not None
-            and self.buffer.embeddings is not None
-            and self.buffer.embedding_valid_mask is not None
-            and self.buffer.embedding_valid_mask[kf_idx].any()
+            and self.buffer.embedding_store is not None
+            and self.buffer.embedding_store.any_valid(kf_idx)
         ):
-            self.loop_closure.add_keyframe(kf_idx, self.buffer.embeddings[kf_idx])
+            staged_emb, _ = self.buffer.embedding_store.stage_frames(
+                torch.tensor([kf_idx], device=self.device)
+            )
+            self.loop_closure.add_keyframe(kf_idx, staged_emb[0])
 
         self.buffer.n_frames += 1
 

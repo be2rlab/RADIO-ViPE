@@ -168,7 +168,7 @@ class FactorGraph:
         with torch.amp.autocast("cuda", enabled=False):
             target, _ = self.buffer.reproject_dense_disp(ii, jj)
 
-            if self.use_semantic_flow_init and self.buffer.embeddings is not None:
+            if self.use_semantic_flow_init and self.buffer.embedding_store is not None:
                 photo_conf = torch.zeros(target.shape[:-1], device=target.device)
                 with torch.no_grad():
                     with profiler_section("fg.semantic_flow_init"):
@@ -408,30 +408,30 @@ class FactorGraph:
         dj: torch.Tensor,
         chunk_size: int = 16,
     ) -> torch.Tensor:
-        embeddings = self.buffer.flattened_embeddings
-        valid_mask = self.buffer.flattened_embedding_valid_mask
+        store = self.buffer.embedding_store
+        staged_emb, staged_valid, di_local, dj_local = store.stage_for_edges(di, dj)
         ht, wd = self.coords0.shape[0:2]
-        H_emb, W_emb = embeddings.shape[2], embeddings.shape[3]
+        H_emb, W_emb = staged_emb.shape[2], staged_emb.shape[3]
         need_resize = (H_emb != ht) or (W_emb != wd)
 
-        src_valid = valid_mask[di].flatten(1).any(dim=1)
-        tgt_valid = valid_mask[dj].flatten(1).any(dim=1)
+        src_valid = staged_valid[di_local].flatten(1).any(dim=1)
+        tgt_valid = staged_valid[dj_local].flatten(1).any(dim=1)
         edge_valid = src_valid & tgt_valid
         valid_idx = torch.where(edge_valid)[0]
 
         if len(valid_idx) == 0:
             return target
 
-        di_v = di[valid_idx]
-        dj_v = dj[valid_idx]
+        di_v = di_local[valid_idx]
+        dj_v = dj_local[valid_idx]
         target_v = target[valid_idx]
         photo_v = photo_conf[valid_idx]
 
         for start in range(0, len(valid_idx), chunk_size):
             end = min(start + chunk_size, len(valid_idx))
 
-            z_i = embeddings[di_v[start:end]]       # (chunk, C, H_emb, W_emb)
-            z_j = embeddings[dj_v[start:end]]
+            z_i = staged_emb[di_v[start:end]]       # (chunk, C, H_emb, W_emb)
+            z_j = staged_emb[dj_v[start:end]]
             if need_resize:
                 z_i = F.interpolate(z_i.float(), size=(ht, wd), mode="bilinear", align_corners=True)
                 z_j = F.interpolate(z_j.float(), size=(ht, wd), mode="bilinear", align_corners=True)
@@ -474,22 +474,22 @@ class FactorGraph:
         self, ii: torch.Tensor, jj: torch.Tensor
     ) -> torch.Tensor | None:
         """Cosine distance between mean-pooled frame embeddings for edge pairs."""
-        if self.buffer.embeddings is None or self.buffer.embedding_valid_mask is None:
+        store = self.buffer.embedding_store
+        if store is None:
             return None
 
-        n = self.buffer.n_frames
-        valid = self.buffer.embedding_valid_mask[:n]  # (T, V, H, W)
-        frame_has_emb = valid.flatten(1).any(dim=1)  # (T,)
-
-        both_valid = frame_has_emb[ii] & frame_has_emb[jj]
+        frame_has_emb = store.frame_has_embeddings(self.buffer.n_frames)  # CPU, no transfer
+        both_valid = frame_has_emb[ii.cpu()] & frame_has_emb[jj.cpu()]
         if not both_valid.any():
             return None
 
-        emb = self.buffer.embeddings[:n]  # (T, V, C, H, W)
-        descs = F.normalize(emb.float().mean(dim=[1, 3, 4]), dim=1, eps=1e-8)
+        # Mean-pool on CPU → tiny (T, C) tensor → transfer only that
+        emb_cpu = store.data[:self.buffer.n_frames]          # (T, V, C, H, W) on CPU
+        descs = emb_cpu.float().mean(dim=[1, 3, 4])          # (T, C) on CPU
+        descs = F.normalize(descs, dim=1, eps=1e-8).to(self.device)  # only (T, C) to GPU
 
         sim = (descs[ii] * descs[jj]).sum(dim=1)
-        return torch.where(both_valid, 1.0 - sim, torch.zeros_like(sim))
+        return torch.where(both_valid.to(self.device), 1.0 - sim, torch.zeros_like(sim))
 
     def add_proximity_factors(
         self,
