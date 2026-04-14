@@ -401,59 +401,59 @@ class FactorGraph:
 
 
     def _blend_semantic_flow(
-        self,
-        target: torch.Tensor,
-        photo_conf: torch.Tensor,
-        di: torch.Tensor,
-        dj: torch.Tensor,
-        chunk_size: int = 16,
-    ) -> torch.Tensor:
-        store = self.buffer.embedding_store
-        staged_emb, staged_valid, di_local, dj_local = store.stage_for_edges(di, dj)
-        ht, wd = self.coords0.shape[0:2]
-        H_emb, W_emb = staged_emb.shape[2], staged_emb.shape[3]
-        need_resize = (H_emb != ht) or (W_emb != wd)
+            self,
+            target: torch.Tensor,
+            photo_conf: torch.Tensor,
+            di: torch.Tensor,
+            dj: torch.Tensor,
+            chunk_size: int = 32,
+        ) -> torch.Tensor:
+            store = self.buffer.embedding_store
+            staged_emb, staged_valid, di_local, dj_local = store.stage_for_edges(di, dj)
+            ht, wd = self.coords0.shape[0:2]
+            H_emb, W_emb = staged_emb.shape[2], staged_emb.shape[3]
+            need_resize = (H_emb != ht) or (W_emb != wd)
 
-        src_valid = staged_valid[di_local].flatten(1).any(dim=1)
-        tgt_valid = staged_valid[dj_local].flatten(1).any(dim=1)
-        edge_valid = src_valid & tgt_valid
-        valid_idx = torch.where(edge_valid)[0]
+            src_valid = staged_valid[di_local].flatten(1).any(dim=1)
+            tgt_valid = staged_valid[dj_local].flatten(1).any(dim=1)
+            edge_valid = src_valid & tgt_valid
+            valid_idx = torch.where(edge_valid)[0]
 
-        if len(valid_idx) == 0:
-            return target
+            if len(valid_idx) == 0:
+                return target
 
-        di_v = di_local[valid_idx]
-        dj_v = dj_local[valid_idx]
-        target_v = target[valid_idx]
-        photo_v = photo_conf[valid_idx]
+            di_v = di_local[valid_idx]
+            dj_v = dj_local[valid_idx]
+            target_v = target[valid_idx]
+            photo_v = photo_conf[valid_idx]
 
-        for start in range(0, len(valid_idx), chunk_size):
-            end = min(start + chunk_size, len(valid_idx))
+            for start in range(0, len(valid_idx), chunk_size):
+                end = min(start + chunk_size, len(valid_idx))
+                sl = slice(start, end)
 
-            z_i = staged_emb[di_v[start:end]]       # (chunk, C, H_emb, W_emb)
-            z_j = staged_emb[dj_v[start:end]]
-            if need_resize:
-                z_i = F.interpolate(z_i.float(), size=(ht, wd), mode="bilinear", align_corners=True)
-                z_j = F.interpolate(z_j.float(), size=(ht, wd), mode="bilinear", align_corners=True)
-            else:
-                z_i = z_i.float()
-                z_j = z_j.float()
+                z_i = staged_emb[di_v[sl]]       # (chunk, C, H_emb, W_emb)
+                z_j = staged_emb[dj_v[sl]]
+                if need_resize:
+                    z_i = F.interpolate(z_i.float(), size=(ht, wd), mode="bilinear", align_corners=True)
+                    z_j = F.interpolate(z_j.float(), size=(ht, wd), mode="bilinear", align_corners=True)
+                else:
+                    z_i = z_i.float()
+                    z_j = z_j.float()
 
-            # semantic_flow_init is still per-edge (grid_sample loop inside),
-            # but the interpolation cost is amortised over the chunk
-            for k in range(end - start):
+                # Batched call: (chunk, K, H, W) all at once
                 omega_sem, sem_conf = semantic_flow_init(
-                    z_i[k], z_j[k], target_v[start + k]
+                    z_i, z_j, target_v[sl]
                 )
-                beta = photo_v[start + k] / (photo_v[start + k] + sem_conf + 1e-6)
-                target[valid_idx[start + k]] = (
-                    beta.unsqueeze(-1) * target_v[start + k]
+                # omega_sem: (chunk, H, W, 2), sem_conf: (chunk, H, W)
+                beta = photo_v[sl] / (photo_v[sl] + sem_conf + 1e-6)
+                target[valid_idx[sl]] = (
+                    beta.unsqueeze(-1) * target_v[sl]
                     + (1.0 - beta.unsqueeze(-1)) * omega_sem
                 )
 
-            del z_i, z_j  # free chunk before next iteration
+                del z_i, z_j
 
-        return target
+            return target
 
     def add_neighborhood_factors(self, t0, t1, r: int = 3):
         """
