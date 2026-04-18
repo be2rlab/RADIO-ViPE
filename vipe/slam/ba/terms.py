@@ -135,7 +135,7 @@ class DenseDepthFlowTerm(SolverTerm):
         embeddings: torch.Tensor | None = None,
         embedding_weight: torch.Tensor | float | None = None,
         embedding_valid_mask: torch.Tensor | None = None,
-        chunk_size: int = 32,
+        chunk_size: int = 4,
         residual_scale: float = 1.0,
         use_photometric_residual: bool = False,
         debug_options: dict[str, Any] | None = None,

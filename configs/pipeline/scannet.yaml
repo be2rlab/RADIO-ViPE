@@ -23,7 +23,8 @@ slam:
   radseg_slide_crop: 336
   radseg_slide_stride: 224
   radseg_lang_align: True
-  pca_dim: null
+  pca_dim: 256
+  pca_state_path: "/home/user/km-vipe/vipe_results/vipe/pca_basis.pt"
 
 # Post-processing configs
 post:
@@ -37,7 +38,6 @@ output:
 
   # Save artifacts and a info file
   save_artifacts: false
-
   save_slam_map: true
 
   # Visualization videos to BASE_PATH/vipe/xxx.mp4

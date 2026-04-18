@@ -398,7 +398,7 @@ class AdaptiveDepthProcessor(StreamProcessor):
                 frame.information = f"uv={min_uv_score:.2f}(SLAM)"
 
             if video_depth_result is not None:
-                video_depth_inv_depth = video_depth_result[frame_idx]
+                video_depth_inv_depth = video_depth_result[frame_idx].cuda()
 
                 align_mask = video_depth_inv_depth > 1e-3
                 if frame.mask is not None:
