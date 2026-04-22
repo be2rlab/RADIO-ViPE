@@ -29,6 +29,7 @@ from ..maths.retractor import BaseRetractor
 from ..maths.vector import SparseBlockVector, SparseNullVector, SparseVectorDict, SparseVectorSubview
 from .kernel import RobustKernel
 from .terms import SolverTerm, SharedProjectionCache
+from vipe.utils.profiler import profile_function, profiler_section
 
 
 logger = logging.getLogger(__name__)
@@ -197,44 +198,45 @@ class Solver:
         shared_cache = SharedProjectionCache() 
 
         energy = 0.0
-        for term, kernel in zip(self.terms, self.kernels):
-            # Compute the newest term formulation
-            term.update(self)
-            if not term.is_active():
-                continue
-            term_return = term.forward(variables, jacobian=True, shared_cache = None)
-            term_group_names = list(term.group_names().difference(fully_fixed_groups))
+        with profiler_section("solver.termloop"):
+            for term, kernel in zip(self.terms, self.kernels):
+                # Compute the newest term formulation
+                term.update(self)
+                if not term.is_active():
+                    continue
+                term_return = term.forward(variables, jacobian=True, shared_cache = shared_cache)
+                term_group_names = list(term.group_names().difference(fully_fixed_groups))
 
-            if kernel is not None:
-                term_return.apply_robust_kernel(kernel)
+                if kernel is not None:
+                    term_return.apply_robust_kernel(kernel)
 
-            if self.compute_energy:
-                energy += term_return.residual().sum().item()
+                if self.compute_energy:
+                    energy += term_return.residual().sum().item()
 
-            for group_name, fixed_inds in self.group_fixed_inds.items():
-                if group_name in term_group_names and fixed_inds is not None:
-                    term_return.remove_jcol_inds(group_name, fixed_inds)
+                for group_name, fixed_inds in self.group_fixed_inds.items():
+                    if group_name in term_group_names and fixed_inds is not None:
+                        term_return.remove_jcol_inds(group_name, fixed_inds)
 
-            # Compute RHS
-            for group_name in term_group_names:
-                rhs[group_name] += term_return.nwjtr(group_name)
+                # Compute RHS
+                for group_name in term_group_names:
+                    rhs[group_name] += term_return.nwjtr(group_name)
 
-            # Compute only upper triangular part of the LHS
-            for group_i in range(len(term_group_names)):
-                for group_j in range(group_i, len(term_group_names)):
-                    group_name_i = term_group_names[group_i]
-                    group_name_j = term_group_names[group_j]
-                    if group_name_i in term_group_names and group_name_j in term_group_names:
-                        jtwj = term_return.jtwj(group_name_i, group_name_j)
-                        lhs[(group_name_i, group_name_j)] += jtwj
+                # Compute only upper triangular part of the LHS
+                for group_i in range(len(term_group_names)):
+                    for group_j in range(group_i, len(term_group_names)):
+                        group_name_i = term_group_names[group_i]
+                        group_name_j = term_group_names[group_j]
+                        if group_name_i in term_group_names and group_name_j in term_group_names:
+                            jtwj = term_return.jtwj(group_name_i, group_name_j)
+                            lhs[(group_name_i, group_name_j)] += jtwj
 
-        all_group_names = list(rhs.keys())
-        marginalized_group_names = [
-            group_name
-            for group_name, marginalized in self.group_marginalized.items()
-            if marginalized and group_name in all_group_names
-        ]
-        regular_group_names = list(set(all_group_names).difference(marginalized_group_names))
+            all_group_names = list(rhs.keys())
+            marginalized_group_names = [
+                group_name
+                for group_name, marginalized in self.group_marginalized.items()
+                if marginalized and group_name in all_group_names
+            ]
+            regular_group_names = list(set(all_group_names).difference(marginalized_group_names))
 
         for group_name in all_group_names:
             damping = self.group_damping.get(group_name, 0.0)
@@ -242,28 +244,30 @@ class Solver:
             lhs[(group_name, group_name)].apply_damping_assume_coalesced(damping, ep)
 
         # Build matrices
-        lhs_h = SparseMatrixSubview(lhs, regular_group_names, regular_group_names)
-        rhs_v = SparseVectorSubview(rhs, regular_group_names)
+        with profiler_section("solver.build_matrices"):
+            lhs_h = SparseMatrixSubview(lhs, regular_group_names, regular_group_names)
+            rhs_v = SparseVectorSubview(rhs, regular_group_names)
 
-        if len(marginalized_group_names) > 0:
-            lhs_e = SparseMatrixSubview(lhs, regular_group_names, marginalized_group_names)
-            lhs_c = SparseMatrixSubview(lhs, marginalized_group_names, marginalized_group_names)
-            rhs_w = SparseVectorSubview(rhs, marginalized_group_names)
+        with profiler_section("solver.solve"):
+            if len(marginalized_group_names) > 0:
+                lhs_e = SparseMatrixSubview(lhs, regular_group_names, marginalized_group_names)
+                lhs_c = SparseMatrixSubview(lhs, marginalized_group_names, marginalized_group_names)
+                rhs_w = SparseVectorSubview(rhs, marginalized_group_names)
 
-            # Apply Schur's formula
-            h_cinv = lhs_e @ lhs_c.inverse()
-            lhs_reg = lhs_h - h_cinv @ lhs_e.transpose()
-            rhs_reg = rhs_v - h_cinv * rhs_w
+                # Apply Schur's formula
+                h_cinv = lhs_e @ lhs_c.inverse()
+                lhs_reg = lhs_h - h_cinv @ lhs_e.transpose()
+                rhs_reg = rhs_v - h_cinv * rhs_w
 
-            x_reg: SparseVectorSubview = self._solve(lhs_reg, rhs_reg)
+                x_reg: SparseVectorSubview = self._solve(lhs_reg, rhs_reg)
 
-            rhs_marg = rhs_w - lhs_e.transpose() * x_reg
-            x_marg: SparseVectorSubview = self._solve(lhs_c, rhs_marg)
+                rhs_marg = rhs_w - lhs_e.transpose() * x_reg
+                x_marg: SparseVectorSubview = self._solve(lhs_c, rhs_marg)
 
-            x_dict = x_reg.get_dict() | x_marg.get_dict()
+                x_dict = x_reg.get_dict() | x_marg.get_dict()
 
-        else:
-            x_dict = self._solve(lhs_h, rhs_v).get_dict()
+            else:
+                x_dict = self._solve(lhs_h, rhs_v).get_dict()
 
         for group_name in all_group_names:
             self.group_retractor[group_name].oplus(

@@ -390,8 +390,8 @@ class FactorGraph:
                 t0=1,
                 t1=t,
                 n_iters=itrs,
-                pose_damping=1e-5,
-                pose_ep=1e-2,
+                pose_damping=1e-4,
+                pose_ep=5e-2,
                 motion_only=motion_only,
                 limited_disp=False,
                 optimize_intrinsics=optimize_intrinsics if not motion_only else False,
@@ -406,7 +406,7 @@ class FactorGraph:
             photo_conf: torch.Tensor,
             di: torch.Tensor,
             dj: torch.Tensor,
-            chunk_size: int = 32,
+            chunk_size: int = 4,
         ) -> torch.Tensor:
             store = self.buffer.embedding_store
             staged_emb, staged_valid, di_local, dj_local = store.stage_for_edges(di, dj)

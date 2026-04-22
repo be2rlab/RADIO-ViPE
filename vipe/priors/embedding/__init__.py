@@ -419,6 +419,8 @@ class EmbeddingsPipeline:
         if self.segment_with_yoloe:
             self._init_yolo_detector(yolo_model_path)
 
+        self._offloaded = False
+
     # ── RADSeg construction ─────────────────────────────────────────
     @staticmethod
     def _build_radseg_encoder(
@@ -809,3 +811,54 @@ class EmbeddingsPipeline:
 
         if vis_features is not None:
             rr.log(f"{entity_path}/{method}", rr.DepthImage(vis_features))
+
+
+    def offload(self) -> None:
+        """Release GPU memory held by the backbone, YOLOE, and PCA basis.
+
+        Call once when no more process_frame/embed_frame calls will happen.
+        The pipeline is left in a non-functional state — only small CPU-side
+        artefacts (PCA basis, config) survive so that things like
+        save_pca_state still work.
+        """
+        # --- backbone (DINOv2 / DINOv3 / RADSeg) ---
+        engine = getattr(self, "engine", None)
+        if engine is not None:
+            # Each engine stores its torch modules under different attribute
+            # names; move any that look like nn.Modules off CUDA.
+            for attr in ("model", "lang_adaptor", "sam_adaptor", "sam",
+                        "transform", "text_embeds"):
+                obj = getattr(engine, attr, None)
+                if obj is None:
+                    continue
+                if isinstance(obj, torch.nn.Module):
+                    obj.to("cpu")
+                elif isinstance(obj, torch.Tensor):
+                    setattr(engine, attr, obj.detach().cpu())
+            # Drop the engine reference; weights will be GC'd after empty_cache().
+            self.engine = None
+
+        # --- YOLOE detector ---
+        yolo = getattr(self, "_yolo_detector", None)
+        if yolo is not None:
+            if hasattr(yolo, "model") and isinstance(yolo.model, torch.nn.Module):
+                yolo.model.to("cpu")
+            self._yolo_detector = None
+
+        # --- PCA basis (small, but no reason to keep on GPU) ---
+        if self.projector is not None and self.projector._basis is not None:
+            b = self.projector._basis
+            b.mean = b.mean.detach().cpu()
+            b.components = b.components.detach().cpu()
+
+        # --- misc small tensors ---
+        self._norm_mean = self._norm_mean.cpu()
+        self._norm_std = self._norm_std.cpu()
+
+        # Mark as offloaded so callers can check / avoid re-use.
+        self._offloaded = True
+        self.device = "cpu"
+
+        torch.cuda.empty_cache()
+        import gc
+        gc.collect()

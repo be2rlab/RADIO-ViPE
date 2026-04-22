@@ -4,11 +4,11 @@ buffer: 1024
 # weight for translation / rotation components of flow
 beta: 0.3
 # how much motion before considering new keyframe
-filter_thresh: 4.0
+filter_thresh: 2.4
 # number of warmup frames
 warmup: 8
 # threshold to create a new keyframe
-keyframe_thresh: 6.0
+keyframe_thresh: 4.0
 # add edges between frames whithin this distance
 frontend_thresh: 16.0
 # frontend optimization window
@@ -73,7 +73,7 @@ embedding_covisibility:
 
 loop_closure:
   enabled: true
-  similarity_thresh: 0.80
+  similarity_thresh: 0.90
   min_interval: 20
   max_candidates: 3
   pose_graph_steps: 2

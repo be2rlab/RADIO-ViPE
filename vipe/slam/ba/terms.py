@@ -838,7 +838,7 @@ class EmbeddingSimilarityTerm(SolverTerm):
         intrinsics: torch.Tensor | None = None,
         intrinsics_factor: float = 8.0,
         rig: SE3 | None = None,
-        chunk_size: int = 32,
+        chunk_size: int = 4,
         residual_scale: float = 1.0,
         use_photometric_residual: bool = False,
         debug_options: dict[str, Any] | None = None,

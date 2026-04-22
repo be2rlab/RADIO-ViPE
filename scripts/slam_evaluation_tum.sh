@@ -2,7 +2,7 @@
 
 export ROOT_DIR=/home/user/km-vipe
 export GT_FOLDER=/data/tum
-export RESULTS_FOLDER=$ROOT_DIR/tum_results_optimized
+export RESULTS_FOLDER=$ROOT_DIR/tum_results_ablation1
 export CUDA_VISIBLE_DEVICES=0
 export SCENE_NAMES=(
     # rgbd_dataset_freiburg1_360
@@ -14,14 +14,14 @@ export SCENE_NAMES=(
     # rgbd_dataset_freiburg1_rpy
     # rgbd_dataset_freiburg1_teddy
     # rgbd_dataset_freiburg1_xyz
-    rgbd_dataset_freiburg3_walking_xyz
-    rgbd_dataset_freiburg3_walking_rpy
+    # rgbd_dataset_freiburg3_walking_xyz
+    # rgbd_dataset_freiburg3_walking_rpy
     rgbd_dataset_freiburg3_walking_halfsphere
-    rgbd_dataset_freiburg3_walking_static
-    rgbd_dataset_freiburg3_sitting_xyz
-    rgbd_dataset_freiburg3_sitting_rpy
-    rgbd_dataset_freiburg3_sitting_halfsphere
-    rgbd_dataset_freiburg3_sitting_static
+    # rgbd_dataset_freiburg3_walking_static
+    # rgbd_dataset_freiburg3_sitting_xyz
+    # rgbd_dataset_freiburg3_sitting_rpy
+    # rgbd_dataset_freiburg3_sitting_halfsphere
+    # rgbd_dataset_freiburg3_sitting_static
 )
 
 

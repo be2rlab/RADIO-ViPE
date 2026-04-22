@@ -16,15 +16,26 @@ def transform_to_evo_trajectory(data):
     timestamps = []
     for i, pose in enumerate(data):
         if len(pose) >= 16:
-                matrix_vals = list(map(float, pose[:16]))
-                pose_matrix = np.array(matrix_vals).reshape(4, 4)
-                tx, ty, tz = pose_matrix[:3, 3]
-                
-                rotation_matrix = pose_matrix[:3, :3]
-                quat = R.from_matrix(rotation_matrix).as_quat()  # returns [x, y, z, w]
-                
-                poses.append([tx, ty, tz, quat[3], quat[0], quat[1], quat[2]])  # [t, qw, qx, qy, qz]
-                timestamps.append(i * 0.1)  # artificial timestamps
+            matrix_vals = list(map(float, pose[:16]))
+            pose_matrix = np.array(matrix_vals).reshape(4, 4)
+
+            # Skip poses with NaN/Inf (e.g. "tracking lost" frames in GT)
+            if not np.all(np.isfinite(pose_matrix)):
+                continue
+
+            tx, ty, tz = pose_matrix[:3, 3]
+            rotation_matrix = pose_matrix[:3, :3]
+            quat = R.from_matrix(rotation_matrix).as_quat()  # [x, y, z, w]
+
+            poses.append([tx, ty, tz, quat[3], quat[0], quat[1], quat[2]])
+            timestamps.append(i * 0.1)
+
+    poses = np.array(poses)
+    return PoseTrajectory3D(
+        positions_xyz=poses[:, :3],
+        orientations_quat_wxyz=poses[:, 3:],
+        timestamps=np.array(timestamps),
+    )
 
     poses = np.array(poses)
     return PoseTrajectory3D(

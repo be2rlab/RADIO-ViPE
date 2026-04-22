@@ -7,6 +7,7 @@ from typing import Any
 import numpy as np
 import rerun as rr
 import torch
+import math
 
 from einops import rearrange
 from omegaconf import DictConfig, OmegaConf
@@ -688,25 +689,86 @@ class GraphBuffer:
 
             disps_flattened = rearrange(self.flattened_disps, "nv h w -> nv (h w)")
 
+
+
             ba_energy = []
             best_energy = None
             stall_count = 0
-            patience = 3 
+            patience = 3
+
+            prev_snap = None
+            cur_snap  = None
+
+            # Adaptive damping
+            lam = float(pose_damping)
+            DAMP_LO, DAMP_HI = 1e-7, 1e-2
+            rollback_count = 0
+            MAX_ROLLBACKS  = 2
+
             for iter_idx in range(n_iters):
                 if embedding_term is not None:
                     embedding_term.set_active(iter_idx >= embedding_term_activation_iter)
+
+                # shift snapshots down, take new one for this iter
+                prev_snap = cur_snap
+                cur_snap = (self.poses.clone(), self.disps.clone(),
+                            self.intrinsics.clone(), self.rig.clone())
+
+                # Apply damping decided at end of previous iter
+                solver.set_damping("pose", damping=lam, ep=pose_ep)
+
                 with profiler_section("buffer.solver.run"):
-                    cur_energy = solver.run_inplace(
-                        {
-                            "pose": SE3(self.poses),
-                            "dense_disp": disps_flattened,
-                            "intrinsics": self.intrinsics,
-                            "rig": SE3(self.rig),
-                        }
+                    cur_energy = solver.run_inplace({
+                        "pose":       SE3(self.poses),
+                        "dense_disp": disps_flattened,
+                        "intrinsics": self.intrinsics,
+                        "rig":        SE3(self.rig),
+                    })
+
+                # ── catastrophic failure: rollback, grow λ hard, retry ──────────
+                non_finite  = not math.isfinite(cur_energy)
+                overshoot   = iter_idx >= 1 and len(ba_energy) > 0 and \
+                            cur_energy > 1.2 * ba_energy[-1] + 1.0
+                catastrophic = non_finite or overshoot
+
+                if catastrophic:
+                    if prev_snap is None:
+                        logger.warning(f"BA non-finite at iter 0, aborting (E={cur_energy})")
+                        break
+                    rollback_count += 1
+                    logger.warning(
+                        f"BA diverged at iter {iter_idx} (E={cur_energy:.3e}, "
+                        f"prev={ba_energy[-1]:.3e}), rollback {rollback_count}/{MAX_ROLLBACKS}, "
+                        f"λ: {lam:.1e} → {min(lam*4.0, DAMP_HI):.1e}"
                     )
+                    self.poses[:]      = prev_snap[0]
+                    self.disps[:]      = prev_snap[1]
+                    self.intrinsics[:] = prev_snap[2]
+                    self.rig[:]        = prev_snap[3]
+                    cur_snap = prev_snap          # we're back at prev_snap now
+                    lam = min(lam * 4.0, DAMP_HI)
+                    if rollback_count >= MAX_ROLLBACKS:
+                        logger.warning(f"BA giving up after {rollback_count} rollbacks")
+                        break
+                    continue  # retry with higher damping, don't record this energy
+
+                # ── healthy step: adapt λ for next iter based on this step's quality ──
+                if iter_idx >= 1 and len(ba_energy) > 0:
+                    ratio = cur_energy / (abs(ba_energy[-1]) + 1e-9)
+                    if ratio < 0.999:
+                        lam = max(lam * 0.5, DAMP_LO)   # clearly improving → relax
+                    elif ratio > 1.05:
+                        lam = min(lam * 3.0, DAMP_HI)   # mildly bad → tighten
+                    # else: noise regime — leave λ alone
+
                 ba_energy.append(cur_energy)
                 if verbose:
-                    logger.info(f"BA iters = {n_iters}, energy: {ba_energy[0]} -> {ba_energy[-1]}")
+                    logger.info(
+                        f"BA iters = {n_iters}, energy: {ba_energy[0]} -> {ba_energy[-1]} "
+                        f"(λ={lam:.1e})"
+                    )
+
+                # ── convergence / stall logic (unchanged) ───────────────────────
                 if best_energy is None or cur_energy < best_energy - 1e-5 * abs(best_energy):
                     best_energy = cur_energy
                     stall_count = 0
