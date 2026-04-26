@@ -43,7 +43,6 @@ class SLAMFrontend:
     For keyframe, it handles the system initialization and partial update logic (i.e. use BA to get pose for this kf).
     """
 
-    loop_closure: LoopClosureDetector | None = None
 
     def __init__(self, net: DroidNet, video: GraphBuffer, args: DictConfig, device: torch.device):
         self.video = video
@@ -127,6 +126,8 @@ class SLAMFrontend:
                 beta=self.beta,
                 remove=True,
             )
+            if hasattr(self, 'loop_closure'):
+                has_loops = self._inject_loop_closure_edges(self.graph, self.video.n_frames)
 
         with profiler_section("frontend.update_iters1"):
             self._run_adaptive_iters(self.min_iters1, self.max_iters1)
@@ -146,8 +147,9 @@ class SLAMFrontend:
                 self.t1 -= 1
                 if self.graph.ii is not None and len(self.graph.ii) > 0:
                     self._ii_min = int(self.graph.ii.min().item())
-                if self.loop_closure is not None:
-                    self.loop_closure.update_after_removal(removed_idx)
+                if hasattr(self, 'loop_closure'):
+                    if self.loop_closure is not None:
+                        self.loop_closure.update_after_removal(removed_idx)
         else:
             with profiler_section("frontend.update_iters2"):
                 self._run_adaptive_iters(self.min_iters2, self.max_iters2)
@@ -159,6 +161,27 @@ class SLAMFrontend:
 
         self.video.dirty[self._ii_min : self.t1] = True
 
+    def _inject_loop_closure_edges(self, graph: FactorGraph, t: int) -> bool:
+        """Add loop closure edges to the factor graph. Returns True if any were added."""
+        if self.loop_closure is None:
+            return False
+
+        lc_tensors = self.loop_closure.get_loop_edges_tensors()
+        if lc_tensors is None:
+            return False
+
+        ii_lc, jj_lc = lc_tensors
+        valid = (ii_lc < t) & (jj_lc < t) & (ii_lc >= 0) & (jj_lc >= 0)
+        if not valid.any():
+            return False
+
+        n_before = graph.ii.shape[0]
+        graph.add_factors(ii_lc[valid], jj_lc[valid])
+        n_added = graph.ii.shape[0] - n_before
+        if n_added > 0:
+            logger.info("Added %d loop closure edges to forend graph", n_added)
+        return n_added > 0
+    
     def __initialize(self):
         """initialize the SLAM system with keyframes idx [t0, t1)"""
 
