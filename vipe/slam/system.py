@@ -135,7 +135,6 @@ class SLAMSystem:
             dataset_name = self.get_config_value(dataset_cfg, "dataset_name")
             dataset_path = self.get_config_value(dataset_cfg, "dataset_path")
             sequence_name = self.get_config_value(dataset_cfg, "sequence_name")
-            # self.metric_depth = make_depth_model(self.config.keyframe_depth,self.config.dataset.dataset_name,self.config.dataset.dataset_path,self.config.dataset.sequence_name)
             self.metric_depth = make_depth_model(self.config.keyframe_depth, dataset_name, dataset_path, sequence_name)
             assert self.metric_depth.depth_type in [
                 DepthType.METRIC_DEPTH,
@@ -148,10 +147,7 @@ class SLAMSystem:
         if self.metric_depth is not None:
             print(f"Using depth model: {self.metric_depth.depth_type}")
         else:
-            print("No depth model used!!!!")
-        # model_family: DinoBackboneFamily = DinoBackboneFamily.DINOV2
-        # model_variant: str | DinoV3Variant | DinoV2Variant = DinoV2Variant.VITB_REG
-        weights_dir = "/home/user/km-vipe/weights/dinov2"
+            print("No depth model used")
         self.pca_state_path = Path(self.config.pca_state_path)
         print(f"pca path is {self.pca_state_path}")
         self._pca_state_saved = False
@@ -159,7 +155,6 @@ class SLAMSystem:
         self.embedder = EmbeddingsPipeline(
             model_family = self.config.model_family,
             model_variant = self.config.model_variant,
-            weights_dir = weights_dir,
             pca_dim = self.config.pca_dim,
             radseg_lang_model = self.config.radseg_lang_model,
             radseg_lang_align = self.config.radseg_lang_align,

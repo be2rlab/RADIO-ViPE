@@ -32,7 +32,7 @@ do
         pipeline.output.path=$RESULTS_FOLDER \
         profiler.output=$RESULTS_FOLDER/profiling/${SCENE_NAME}.txt \
         pipeline.slam.pca_state_path=$RESULTS_FOLDER/vipe/${SCENE_NAME}_pca_basis.pt \
-        # pipeline.slam.dataset.sequence_name=$SCENE_NAME \
+        pipeline.slam.sequence_name=$SCENE_NAME \
         # pipeline.slam.keyframe_depth=dataset \
 
     python $ROOT_DIR/scripts/rmse_evaluation.py \
