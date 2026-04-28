@@ -18,6 +18,8 @@
 # Licensed under the MIT License. See THIRD_PARTY_LICENSES.md for details.
 # -------------------------------------------------------------------------------------------------
 
+
+# /vipe/slam/components/frontend.py
 import logging
 
 import torch
@@ -30,7 +32,7 @@ from ..networks.droid_net import DroidNet
 from .buffer import GraphBuffer
 from .factor_graph import FactorGraph
 from .loop_closure import LoopClosureDetector
-
+from vipe.utils.profiler import profile_function, profiler_section
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +43,6 @@ class SLAMFrontend:
     For keyframe, it handles the system initialization and partial update logic (i.e. use BA to get pose for this kf).
     """
 
-    loop_closure: LoopClosureDetector | None = None
 
     def __init__(self, net: DroidNet, video: GraphBuffer, args: DictConfig, device: torch.device):
         self.video = video
@@ -107,73 +108,98 @@ class SLAMFrontend:
         # self.video.poses[self.t1] = self.video.poses[self.t1 - 1].clone()
 
     def __update(self):
-        """add edges, perform update"""
-
         self.t1 += 1
 
-        # t1 - 1 is the new-added frame
-        # t1 - 2 is the previous frame
-        # t1 - 3 is the frame before the previous frame
+        with profiler_section("frontend.rm_old_factors"):
+            if self.graph.corr is not None and self.graph.age.max().item() > self.max_age:
+                self.graph.rm_factors(self.graph.age > self.max_age, store=True)
+                if self.graph.ii is not None and len(self.graph.ii) > 0:
+                    self._ii_min = int(self.graph.ii.min().item())
 
-        if self.graph.corr is not None and self.graph.age.max().item() > self.max_age:
-            self.graph.rm_factors(self.graph.age > self.max_age, store=True)
-            # Keep _ii_min in sync after removals.
-            if self.graph.ii is not None and len(self.graph.ii) > 0:
-                self._ii_min = int(self.graph.ii.min().item())
+        with profiler_section("frontend.add_proximity"):
+            self.graph.add_proximity_factors(
+                self.t1 - 5,
+                max(self.t1 - self.frontend_window, 0),
+                rad=self.frontend_radius,
+                nms=self.frontend_nms,
+                thresh=self.frontend_thresh,
+                beta=self.beta,
+                remove=True,
+            )
+            if hasattr(self, 'loop_closure'):
+                has_loops = self._inject_loop_closure_edges(self.graph, self.video.n_frames)
 
-        self.graph.add_proximity_factors(
-            self.t1 - 5,
-            max(self.t1 - self.frontend_window, 0),
-            rad=self.frontend_radius,
-            nms=self.frontend_nms,
-            thresh=self.frontend_thresh,
-            beta=self.beta,
-            remove=True,
-        )
+        with profiler_section("frontend.update_iters1"):
+            self._run_adaptive_iters(self.min_iters1, self.max_iters1)
 
-        self._run_adaptive_iters(self.min_iters1, self.max_iters1)
-        self._idx_buf[0] = self.t1 - 3
-        self._idx_buf[1] = self.t1 - 2
+        with profiler_section("frontend.frame_distance"):
+            self._idx_buf[0] = self.t1 - 3
+            self._idx_buf[1] = self.t1 - 2
+            d = self.video.frame_distance_dense_disp(
+                self._idx_buf[:1], self._idx_buf[1:],
+                beta=self.beta, bidirectional=True,
+            )
 
-        # remove frame t1-2 if it is too close to t1-3, so the new keyframes will be [t1-3, t1-1]
-        d = self.video.frame_distance_dense_disp(
-            self._idx_buf[:1],   # t1-3
-            self._idx_buf[1:],   # t1-2
-            beta=self.beta,
-            bidirectional=True,
-        )
         if d.max().item() < self.keyframe_thresh:
-            removed_idx = self.t1 - 2
-            self.graph.rm_second_newest_keyframe(removed_idx)
-            self.t1 -= 1
-            # Keep _ii_min in sync after keyframe removal.
-            if self.graph.ii is not None and len(self.graph.ii) > 0:
-                self._ii_min = int(self.graph.ii.min().item())
-            if self.loop_closure is not None:
-                self.loop_closure.update_after_removal(removed_idx)
+            with profiler_section("frontend.rm_keyframe"):
+                removed_idx = self.t1 - 2
+                self.graph.rm_second_newest_keyframe(removed_idx)
+                self.t1 -= 1
+                if self.graph.ii is not None and len(self.graph.ii) > 0:
+                    self._ii_min = int(self.graph.ii.min().item())
+                if hasattr(self, 'loop_closure'):
+                    if self.loop_closure is not None:
+                        self.loop_closure.update_after_removal(removed_idx)
         else:
-            self._run_adaptive_iters(self.min_iters2, self.max_iters2)
+            with profiler_section("frontend.update_iters2"):
+                self._run_adaptive_iters(self.min_iters2, self.max_iters2)
 
-        # set pose for next iteration
-        if not self.has_init_pose:
-            self.__init_pose()
-        self._predict_next_disp()
+        with profiler_section("frontend.init_pose_and_disp"):
+            if not self.has_init_pose:
+                self.__init_pose()
+            self._predict_next_disp()
 
         self.video.dirty[self._ii_min : self.t1] = True
 
+    def _inject_loop_closure_edges(self, graph: FactorGraph, t: int) -> bool:
+        """Add loop closure edges to the factor graph. Returns True if any were added."""
+        if self.loop_closure is None:
+            return False
+
+        lc_tensors = self.loop_closure.get_loop_edges_tensors()
+        if lc_tensors is None:
+            return False
+
+        ii_lc, jj_lc = lc_tensors
+        valid = (ii_lc < t) & (jj_lc < t) & (ii_lc >= 0) & (jj_lc >= 0)
+        if not valid.any():
+            return False
+
+        n_before = graph.ii.shape[0]
+        graph.add_factors(ii_lc[valid], jj_lc[valid])
+        n_added = graph.ii.shape[0] - n_before
+        if n_added > 0:
+            logger.info("Added %d loop closure edges to forend graph", n_added)
+        return n_added > 0
+    
     def __initialize(self):
         """initialize the SLAM system with keyframes idx [t0, t1)"""
 
         self.t1 = self.video.n_frames
 
-        self.graph.add_neighborhood_factors(0, self.t1, r=1 if self.args.seq_init else 3)
-        for _ in range(8):
-            self.graph.update(t0=1, use_inactive=True, fixed_motion=self.has_init_pose)
+        with profiler_section("frontend.init.neighborhood"):
+            self.graph.add_neighborhood_factors(0, self.t1, r=1 if self.args.seq_init else 3)
 
-        if not self.args.seq_init:
-            self.graph.add_proximity_factors(0, 0, rad=2, nms=2, thresh=self.frontend_thresh, remove=False)
+        with profiler_section("frontend.init.update_pass1"):
             for _ in range(8):
                 self.graph.update(t0=1, use_inactive=True, fixed_motion=self.has_init_pose)
+
+        if not self.args.seq_init:
+            with profiler_section("frontend.init.proximity"):
+                self.graph.add_proximity_factors(0, 0, rad=2, nms=2, thresh=self.frontend_thresh, remove=False)
+            with profiler_section("frontend.init.update_pass2"):
+                for _ in range(8):
+                    self.graph.update(t0=1, use_inactive=True, fixed_motion=self.has_init_pose)
 
         if not self.has_init_pose:
             self.__init_pose()
@@ -191,20 +217,24 @@ class SLAMFrontend:
     def _run_adaptive_iters(self, min_iters: int, max_iters: int):
         """Run GRU update iterations, stopping early when the flow delta converges.
         """
-        delta_norm = float("inf")
         for i in range(max_iters):
-            delta_norm = self.graph.update(
+            delta_norm, energy = self.graph.update(
                 use_inactive=True, fixed_motion=self.has_init_pose
             )
             if i < min_iters - 1:
-                # Haven't done the minimum yet — keep going unconditionally.
                 continue
-            if self.adaptive_iters and delta_norm < self.convergence_thresh:
-                logger.debug(
-                    "Frontend converged at iter %d/%d (delta=%.4f < %.4f)",
-                    i + 1, max_iters, delta_norm, self.convergence_thresh,
-                )
-                break
+
+            if self.adaptive_iters:
+                # Check both: flow delta AND energy convergence
+                rel_change = abs(prev_energy - energy) / (abs(prev_energy) + 1e-12)
+                if delta_norm < self.convergence_thresh or rel_change < 1e-4:
+                    logger.debug(
+                        "Frontend converged at iter %d/%d "
+                        "(delta=%.4f, energy_rel=%.2e)",
+                        i + 1, max_iters, delta_norm, rel_change,
+                    )
+                    break
+            prev_energy = energy
 
     def _predict_next_disp(self):
         """Predict disparity for the next keyframe slot using depth prior when available.

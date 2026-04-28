@@ -34,8 +34,27 @@ class LoopClosureDetector:
 
     @staticmethod
     def _compute_global_descriptor(embeddings: torch.Tensor) -> torch.Tensor:
-        """Mean-pool spatial embedding features into a single L2-normalised vector."""
-        desc = embeddings.float().mean(dim=[0, 2, 3])
+        """
+        Multi-scale pooled descriptor:
+        - Global (1x1)
+        - 1x2 split
+        - 2x2 split
+        Returns concatenated L2-normalized descriptor.
+        """
+        x = embeddings.float()
+
+        pools = []
+
+        # 1x1
+        pools.append(F.adaptive_avg_pool2d(x, (1, 1)).reshape(-1))
+
+        # 1x2
+        pools.append(F.adaptive_avg_pool2d(x, (1, 2)).reshape(-1))
+
+        # 2x2
+        pools.append(F.adaptive_avg_pool2d(x, (2, 2)).reshape(-1))
+
+        desc = torch.cat(pools, dim=0)
         return F.normalize(desc, dim=0)
 
     def add_keyframe(

@@ -443,6 +443,25 @@ class CachedVideoStream(VideoStream):
     def attributes(self) -> set[FrameAttribute]:
         return self._attributes
 
+    
+    def get_stream_attribute_cpu(self, attribute: FrameAttribute) -> list[Any]:
+        """Return attribute values directly from CPU cache — no CUDA copy."""
+        result = []
+        for idx in range(len(self)):
+            # Force cache population without .cuda()
+            n_iters_needed = idx - len(self.data) + 1
+            if n_iters_needed > 0:
+                for _ in range(n_iters_needed):
+                    if self.iterator is not None:
+                        try:
+                            self.data.append(next(self.iterator).cpu())
+                        except StopIteration:
+                            self._len = len(self.data)
+                            break
+            if idx < len(self.data):
+                result.append(self.data[idx].get_attribute(attribute))
+        return result
+
 
 class StreamProcessor(Protocol):
     """

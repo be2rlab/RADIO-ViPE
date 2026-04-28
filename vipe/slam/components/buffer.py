@@ -7,6 +7,7 @@ from typing import Any
 import numpy as np
 import rerun as rr
 import torch
+import math
 
 from einops import rearrange
 from omegaconf import DictConfig, OmegaConf
@@ -18,6 +19,7 @@ from vipe.priors.depth.base import DepthType
 from vipe.utils.cameras import CameraType
 from vipe.utils.logging import pbar
 from vipe.utils.visualization import POINTS_STENCIL, draw_lines_batch, draw_points_batch
+from vipe.utils.profiler import profile_function, profiler_section
 
 from ..ba.solver import Solver, SparseBlockVector
 from ..ba.terms import DenseDepthFlowTerm, DispSensRegularizationTerm, EmbeddingSimilarityTerm
@@ -29,6 +31,97 @@ from ..ba.kernel import AdaptiveBarronRobustKernel
 
 
 logger = logging.getLogger(__name__)
+
+
+class EmbeddingStore:
+    """CPU-pinned embedding storage with on-demand GPU staging."""
+
+    def __init__(self, buffer_size: int, n_views: int,
+                 embed_dim: int, height: int, width: int,
+                 device: torch.device):
+        # main storage lives on CPU, pinned for async copies
+        self.data = torch.zeros(
+            buffer_size, n_views, embed_dim, height, width,
+            dtype=torch.float16,
+        ).pin_memory()
+        self.valid = torch.zeros(
+            buffer_size, n_views, height, width,
+            dtype=torch.bool,
+        ).pin_memory()
+        self.device = device
+        self.n_views = n_views
+        self.embed_dim = embed_dim
+        self.resolution = (height, width)
+
+    # writes
+    def set_embeddings(self, frame_idx: int, view_idx: int,
+            embeddings: torch.Tensor):
+        self.data[frame_idx, view_idx] = embeddings.cpu().half()
+        self.valid[frame_idx, view_idx] = True
+
+    def clear(self, frame_idx: int, view_idx: int):
+        self.valid[frame_idx, view_idx] = False
+
+    def shift(self, dst: int, src: int):
+        """For remove_second_newest."""
+        self.data[dst] = self.data[src]
+        self.valid[dst] = self.valid[src]
+
+    # GPU staging for edge-indexed access (BA, semantic flow)
+    @profile_function()
+    def stage_for_edges(
+        self, di: torch.Tensor, dj: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Stage only the frames touched by edges (di, dj) to GPU.
+
+        Returns:
+            staged_emb   : (K, C, H, W) fp16 on GPU — compact subset
+            staged_valid : (K, H, W) bool on GPU
+            di_local     : remapped di indices into [0..K)
+            dj_local     : remapped dj indices into [0..K)
+        """
+        flat_all = torch.cat([di, dj])
+        unique_flat, inverse = torch.unique(flat_all, return_inverse=True)
+
+        frames = (unique_flat // self.n_views).cpu()
+        views  = (unique_flat % self.n_views).cpu()
+
+        # single async copy of the compact subset
+        staged_emb = self.data[frames, views].to(
+            self.device, non_blocking=True)
+        staged_valid = self.valid[frames, views].to(
+            self.device, non_blocking=True)
+        torch.cuda.current_stream().synchronize()
+
+        di_local = inverse[:len(di)]
+        dj_local = inverse[len(di):]
+        return staged_emb, staged_valid, di_local, dj_local
+
+    # GPU staging for bulk reads (frame distance, extract map)
+    @profile_function()
+    def stage_range(self, n_frames: int):
+        """Stage embeddings[:n_frames] to GPU. Returns (T,V,C,H,W) + valid."""
+        emb   = self.data[:n_frames].to(self.device, non_blocking=True)
+        valid = self.valid[:n_frames].to(self.device, non_blocking=True)
+        torch.cuda.current_stream().synchronize()
+        return emb, valid
+
+    @profile_function()
+    def stage_frames(self, indices: torch.Tensor):
+        """Stage specific frame indices (un-flattened). Returns (N,V,C,H,W)."""
+        emb   = self.data[indices.cpu()].to(self.device, non_blocking=True)
+        valid = self.valid[indices.cpu()].to(self.device, non_blocking=True)
+        torch.cuda.current_stream().synchronize()
+        return emb, valid
+
+    # CPU-side checks
+    def any_valid(self, frame_idx: int) -> bool:
+        return self.valid[frame_idx].any().item()
+
+    def frame_has_embeddings(self, n_frames: int) -> torch.Tensor:
+        """(T,) bool — which frames have any valid embedding. CPU."""
+        return self.valid[:n_frames].flatten(1).any(dim=1)
 
 
 class GraphBuffer:
@@ -132,10 +225,7 @@ class GraphBuffer:
         )
 
         # Embeddings for semantic similarity
-        self.embeddings: torch.Tensor | None = None
-        self.embedding_valid_mask: torch.Tensor | None = None
-        self.embedding_dim: int | None = None
-        self.embedding_resolution: tuple[int, int] | None = None
+        self.embedding_store: EmbeddingStore | None = None
 
         # Droid attributes
         # The updated operator will take the correlation volume of fmaps, the nets, and the inps,
@@ -200,54 +290,21 @@ class GraphBuffer:
     def flattened_inps(self):
         return rearrange(self.inps, "n v c h w -> (n v) c h w")
 
-    @property
-    def flattened_embeddings(self) -> torch.Tensor:
-        if self.embeddings is None:
-            raise RuntimeError("Embeddings have not been initialized")
-        return rearrange(self.embeddings, "n v c h w -> (n v) c h w")
-
-    @property
-    def flattened_embedding_valid_mask(self) -> torch.Tensor:
-        if self.embedding_valid_mask is None:
-            raise RuntimeError("Embedding validity mask has not been initialized")
-        return rearrange(self.embedding_valid_mask, "n v h w -> (n v) h w")
-
-    def _ensure_embedding_storage(self, embed_dim: int, height: int, width: int) -> None:
-        if self.embeddings is None:
-            self.embeddings = torch.zeros(
-                self.buffer_size,
-                self.n_views,
-                embed_dim,
-                height,
-                width,
-                device=self.device,
-                dtype=torch.float16,
+    def _ensure_embedding_store(self, embed_dim: int, height: int, width: int) -> None:
+        if self.embedding_store is None:
+            self.embedding_store = EmbeddingStore(
+                self.buffer_size, self.n_views, embed_dim, height, width, self.device
             )
-            self.embedding_valid_mask = torch.zeros(
-                self.buffer_size,
-                self.n_views,
-                height,
-                width,
-                device=self.device,
-                dtype=torch.bool,
-            )
-            self.embedding_dim = embed_dim
-            self.embedding_resolution = (height, width)
-        else:
-            assert self.embedding_dim == embed_dim
-            assert self.embedding_resolution == (height, width)
-
+    
     def set_embeddings(self, frame_idx: int, view_idx: int, embeddings: torch.Tensor | None) -> None:
         if embeddings is None:
-            if self.embedding_valid_mask is not None:
-                self.embedding_valid_mask[frame_idx, view_idx] = False
+            if self.embedding_store is not None:
+                self.embedding_store.clear(frame_idx, view_idx)
             return
         embed_dim = embeddings.shape[0]
         height, width = embeddings.shape[1:]
-        self._ensure_embedding_storage(embed_dim, height, width)
-        assert self.embeddings is not None and self.embedding_valid_mask is not None
-        self.embeddings[frame_idx, view_idx] = embeddings.to(self.device, dtype=torch.float16)
-        self.embedding_valid_mask[frame_idx, view_idx] = True
+        self._ensure_embedding_store(embed_dim, height, width)
+        self.embedding_store.set_embeddings(frame_idx, view_idx, embeddings)
 
     @property
     def K(self) -> np.ndarray:
@@ -277,9 +334,8 @@ class GraphBuffer:
         self.nets[ix] = self.nets[ix + 1]
         self.inps[ix] = self.inps[ix + 1]
         self.fmaps[ix] = self.fmaps[ix + 1]
-        if self.embeddings is not None and self.embedding_valid_mask is not None:
-            self.embeddings[ix] = self.embeddings[ix + 1]
-            self.embedding_valid_mask[ix] = self.embedding_valid_mask[ix + 1]
+        if self.embedding_store is not None:
+            self.embedding_store.shift(ix, ix + 1)
         self.masks[ix] = self.masks[ix + 1]
         self.cross_view_idx[ix] = self.cross_view_idx[ix + 1]
         self.n_frames -= 1
@@ -457,7 +513,13 @@ class GraphBuffer:
             di_unique = torch.unique(di)
             pi_unique = torch.unique(ii)  # Should be equivalent to unique(pi)
 
-            solver = Solver(compute_energy=verbose)
+            staged_emb, staged_valid = None, None
+            di_ba, dj_ba = di, dj
+            if self.embedding_store is not None:
+                (staged_emb, staged_valid,
+                di_ba, dj_ba) = self.embedding_store.stage_for_edges(di, dj)
+
+            solver = Solver(compute_energy=True)
 
             embedding_term_activation_iter = n_iters
             embedding_term = None
@@ -470,17 +532,38 @@ class GraphBuffer:
             alpha_huber = float(getattr(self.ba_config, "alpha_huber", 1.0))
             alpha_dynamic = float(getattr(self.ba_config, "alpha_dynamic", -2.0))
             embedding_weight_map: torch.Tensor | None = None
-            if self.embeddings is not None or use_semantic_kernel:
-                embedding_valid = self.flattened_embedding_valid_mask if self.embedding_valid_mask is not None else None
+            if (staged_emb is not None or use_semantic_kernel):
                 dense_h, dense_w = self.height // 8, self.width // 8
                 per_pixel_weight = rearrange(
-                    weight.detach(),
-                    "nv (h w) c -> nv h w c",
-                    h=dense_h,
-                    w=dense_w,
-                    c=2,
+                    weight.detach(), "nv (h w) c -> nv h w c", h=dense_h, w=dense_w, c=2,
                 ).mean(dim=-1)
                 embedding_weight_map = embedding_weight * per_pixel_weight
+
+            if staged_emb is not None and embedding_weight > 0.0:
+                embedding_term = EmbeddingSimilarityTerm(
+                    pose_i_inds=pi,
+                    pose_j_inds=pj,
+                    rig_i_inds=qi,
+                    rig_j_inds=qj,
+                    dense_disp_i_inds=di,
+                    dense_disp_j_inds=dj,
+                    embedding_i_inds=di_ba,
+                    embedding_j_inds=dj_ba,
+                    embeddings=staged_emb,
+                    embedding_valid_mask=staged_valid,
+                    weight=embedding_weight_map,
+                    intrinsics=None,
+                    intrinsics_factor=8.0,
+                    rig=None,
+                    image_size=(self.height // 8, self.width // 8),
+                    camera_type=self.camera_type,
+                    debug_options=self.embedding_debug_options,
+                )
+                solver.add_term(embedding_term)
+                raw_fine_iters = getattr(self.ba_config, "embedding_fine_iters", None)
+                embedding_fine_iters_cfg = n_iters if raw_fine_iters in (None, "null") else int(raw_fine_iters)
+                embedding_fine_iters = n_iters if embedding_fine_iters_cfg <= 0 else min(embedding_fine_iters_cfg, n_iters)
+                embedding_term_activation_iter = max(0, n_iters - embedding_fine_iters)
 
             solver.add_term(
                 DenseDepthFlowTerm(
@@ -490,12 +573,14 @@ class GraphBuffer:
                     rig_j_inds=qj,
                     dense_disp_i_inds=di,
                     dense_disp_j_inds=dj,
-                    embeddings=self.flattened_embeddings if self.embeddings is not None else None,
-                    embedding_valid_mask=embedding_valid if self.embeddings is not None else None,
-                    embedding_weight=embedding_weight_map if self.embeddings is not None else None,
+                    embedding_i_inds = di_ba,
+                    embedding_j_inds = dj_ba,
+                    embeddings = staged_emb,
+                    embedding_valid_mask = staged_valid,
+                    embedding_weight=embedding_weight_map if staged_emb is not None else None,
+                    debug_options=self.embedding_debug_options if staged_emb is not None else None,
                     target=target,
                     weight=weight_dense_disp * weight,
-                    debug_options=self.embedding_debug_options if self.embeddings is not None else None,
                     intrinsics=None,
                     intrinsics_factor=8.0,
                     rig=None,
@@ -510,30 +595,6 @@ class GraphBuffer:
                     alpha_dynamic=alpha_dynamic,
                 ), AdaptiveBarronRobustKernel()
             )
-
-            if self.embeddings is not None and embedding_weight > 0.0:
-                embedding_term = EmbeddingSimilarityTerm(
-                    pose_i_inds=pi,
-                    pose_j_inds=pj,
-                    rig_i_inds=qi,
-                    rig_j_inds=qj,
-                    dense_disp_i_inds=di,
-                    dense_disp_j_inds=dj,
-                    embeddings=self.flattened_embeddings,
-                    embedding_valid_mask=embedding_valid,
-                    weight=embedding_weight_map,
-                    intrinsics=None,
-                    intrinsics_factor=8.0,
-                    rig=None,
-                    image_size=(self.height // 8, self.width // 8),
-                    camera_type=self.camera_type,
-                    debug_options=self.embedding_debug_options,
-                )
-                solver.add_term(embedding_term)
-                raw_fine_iters = getattr(self.ba_config, "embedding_fine_iters", None)
-                embedding_fine_iters_cfg = n_iters if raw_fine_iters in (None, "null") else int(raw_fine_iters)
-                embedding_fine_iters = n_iters if embedding_fine_iters_cfg <= 0 else min(embedding_fine_iters_cfg, n_iters)
-                embedding_term_activation_iter = max(0, n_iters - embedding_fine_iters)
 
             if self.sparse_tracks.enabled:
                 # This does not support cross-view tracking yet.
@@ -554,6 +615,11 @@ class GraphBuffer:
                         rig_i_inds=qi,
                         rig_j_inds=qj,
                         dense_disp_i_inds=di,
+                        embedding_i_inds=None,
+                        embedding_j_inds=None,
+                        embeddings=None,
+                        embedding_valid_mask=None,
+                        embedding_weight=None,
                         target=sparse_target,
                         weight=weight_tracks * sparse_weight,
                         intrinsics=None,
@@ -623,21 +689,95 @@ class GraphBuffer:
 
             disps_flattened = rearrange(self.flattened_disps, "nv h w -> nv (h w)")
 
+
+
             ba_energy = []
+            best_energy = None
+            stall_count = 0
+            patience = 3
+
+            prev_snap = None
+            cur_snap  = None
+
+            # Adaptive damping
+            lam = float(pose_damping)
+            DAMP_LO, DAMP_HI = 1e-7, 1e-2
+            rollback_count = 0
+            MAX_ROLLBACKS  = 2
+
             for iter_idx in range(n_iters):
                 if embedding_term is not None:
                     embedding_term.set_active(iter_idx >= embedding_term_activation_iter)
-                cur_energy = solver.run_inplace(
-                    {
-                        "pose": SE3(self.poses),
+
+                # shift snapshots down, take new one for this iter
+                prev_snap = cur_snap
+                cur_snap = (self.poses.clone(), self.disps.clone(),
+                            self.intrinsics.clone(), self.rig.clone())
+
+                # Apply damping decided at end of previous iter
+                solver.set_damping("pose", damping=lam, ep=pose_ep)
+
+                with profiler_section("buffer.solver.run"):
+                    cur_energy = solver.run_inplace({
+                        "pose":       SE3(self.poses),
                         "dense_disp": disps_flattened,
                         "intrinsics": self.intrinsics,
-                        "rig": SE3(self.rig),
-                    }
-                )
+                        "rig":        SE3(self.rig),
+                    })
+
+                # ── catastrophic failure: rollback, grow λ hard, retry ──────────
+                non_finite  = not math.isfinite(cur_energy)
+                overshoot   = iter_idx >= 1 and len(ba_energy) > 0 and \
+                            cur_energy > 1.2 * ba_energy[-1] + 1.0
+                catastrophic = non_finite or overshoot
+
+                if catastrophic:
+                    if prev_snap is None:
+                        logger.warning(f"BA non-finite at iter 0, aborting (E={cur_energy})")
+                        break
+                    rollback_count += 1
+                    logger.warning(
+                        f"BA diverged at iter {iter_idx} (E={cur_energy:.3e}, "
+                        f"prev={ba_energy[-1]:.3e}), rollback {rollback_count}/{MAX_ROLLBACKS}, "
+                        f"λ: {lam:.1e} → {min(lam*4.0, DAMP_HI):.1e}"
+                    )
+                    self.poses[:]      = prev_snap[0]
+                    self.disps[:]      = prev_snap[1]
+                    self.intrinsics[:] = prev_snap[2]
+                    self.rig[:]        = prev_snap[3]
+                    cur_snap = prev_snap          # we're back at prev_snap now
+                    lam = min(lam * 4.0, DAMP_HI)
+                    if rollback_count >= MAX_ROLLBACKS:
+                        logger.warning(f"BA giving up after {rollback_count} rollbacks")
+                        break
+                    continue  # retry with higher damping, don't record this energy
+
+                # ── healthy step: adapt λ for next iter based on this step's quality ──
+                if iter_idx >= 1 and len(ba_energy) > 0:
+                    ratio = cur_energy / (abs(ba_energy[-1]) + 1e-9)
+                    if ratio < 0.999:
+                        lam = max(lam * 0.5, DAMP_LO)   # clearly improving → relax
+                    elif ratio > 1.05:
+                        lam = min(lam * 3.0, DAMP_HI)   # mildly bad → tighten
+                    # else: noise regime — leave λ alone
+
                 ba_energy.append(cur_energy)
                 if verbose:
-                    logger.info(f"BA iters = {n_iters}, energy: {ba_energy[0]} -> {ba_energy[-1]}")
+                    logger.info(
+                        f"BA iters = {n_iters}, energy: {ba_energy[0]} -> {ba_energy[-1]} "
+                        f"(λ={lam:.1e})"
+                    )
+
+                # ── convergence / stall logic (unchanged) ───────────────────────
+                if best_energy is None or cur_energy < best_energy - 1e-5 * abs(best_energy):
+                    best_energy = cur_energy
+                    stall_count = 0
+                else:
+                    stall_count += 1
+
+                if stall_count >= patience:
+                    logger.info(f"BA early stopping at iteration {iter_idx} with energy {cur_energy}")
+                    break
 
             self.disps.clamp_(min=0.001)
 
@@ -754,13 +894,19 @@ class GraphBuffer:
             pts_list.append(pts)
             mask_list.append(masks)
 
+        if self.embedding_store is not None:
+            staged_emb, staged_valid = self.embedding_store.stage_frames(t_range)
+        else:
+            staged_emb = None
+            staged_valid = None
+
         return SLAMMap.from_masked_dense_disp(
             torch.stack(pts_list, dim=1),
             images,
             torch.stack(mask_list, dim=1),
             self.tstamp[t_range],
-            self.embeddings[t_range].permute(0,1,3,4,2),
-            self.embedding_valid_mask[t_range]
+            staged_emb[...].permute(0,1,3,4,2),
+            staged_valid,
         )
 
     def log_tracks(self):

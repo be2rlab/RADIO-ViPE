@@ -13,9 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import csv
 import logging
+import os
+import time
 
 from collections import defaultdict
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -24,24 +28,98 @@ from ..maths.matrix import SparseBlockMatrixDict, SparseMatrixSubview, SparseNul
 from ..maths.retractor import BaseRetractor
 from ..maths.vector import SparseBlockVector, SparseNullVector, SparseVectorDict, SparseVectorSubview
 from .kernel import RobustKernel
-from .terms import SolverTerm
+from .terms import SolverTerm, SharedProjectionCache
+from vipe.utils.profiler import profile_function, profiler_section
 
 
 logger = logging.getLogger(__name__)
 
 
-def solve_scipy(pi: torch.Tensor, pj: torch.Tensor, lhs: torch.Tensor, rhs: torch.Tensor):
+_DENSE_GPU_DIM_THRESHOLD = 150
+
+
+def _solve_dense_gpu(
+    pi: torch.Tensor,
+    pj: torch.Tensor,
+    lhs_vals: torch.Tensor,
+    rhs: torch.Tensor,
+) -> torch.Tensor:
+    """Assemble COO triplets into a dense matrix on GPU and solve.
+
+    Avoids memory round-trip and faster for lager systems(backend BA)
+
+    Falls back to pivoted general solve on Cholesky failure (e.g. when the
+    system is barely positive-definite due to numeric noise).
+    """
+    n = rhs.shape[0]
+    device = rhs.device
+
+    A = torch.zeros(n, n, dtype=torch.float64, device=device)
+    A.index_put_((pi, pj), lhs_vals.to(torch.float64), accumulate=True)
+
+    b = rhs.to(torch.float64)
+
+    try:
+        L = torch.linalg.cholesky(A)
+        x = torch.cholesky_solve(b.unsqueeze(-1), L).squeeze(-1)
+    except torch.linalg.LinAlgError:
+        x = torch.linalg.solve(A, b)
+
+    return x.to(torch.float32)
+
+
+def _solve_sparse_cpu(
+    pi: torch.Tensor,
+    pj: torch.Tensor,
+    lhs_vals: torch.Tensor,
+    rhs: torch.Tensor,
+) -> torch.Tensor:
+    """Sparse solve on CPU via scipy — used only when the system is small
+    enough that a dense GPU solve would be wasteful."""
     from scipy.sparse import coo_matrix
     from scipy.sparse.linalg import spsolve
 
-    lhs = coo_matrix((lhs.cpu().numpy(), (pi.cpu().numpy(), pj.cpu().numpy())))
-    # Convert to CSR format for efficient spsolve
-    lhs = lhs.tocsr()
-    rhs = rhs.cpu().numpy()
+    pi_np = pi.cpu().numpy()
+    pj_np = pj.cpu().numpy()
+    vals_np = lhs_vals.cpu().numpy()
+    rhs_np = rhs.cpu().numpy()
 
-    x = spsolve(lhs, rhs)
+    n = rhs_np.shape[0]
+    A = coo_matrix((vals_np, (pi_np, pj_np)), shape=(n, n))
+    A = A.tocsr()
 
-    return torch.tensor(x, device=pi.device).float()
+    x = spsolve(A, rhs_np)
+    return torch.tensor(x, device=pi.device, dtype=torch.float32)
+
+
+def solve_linear_system(
+    pi: torch.Tensor,
+    pj: torch.Tensor,
+    lhs: torch.Tensor,
+    rhs: torch.Tensor,
+) -> torch.Tensor:
+    """Dispatch to the fastest available solver for the given system size.
+
+    • dim >= _DENSE_GPU_DIM_THRESHOLD  -> dense Cholesky on GPU
+    • dim <  _DENSE_GPU_DIM_THRESHOLD -> scipy sparse on CPU
+    """
+    n = rhs.shape[0]
+    use_gpu = n >= _DENSE_GPU_DIM_THRESHOLD and rhs.is_cuda
+
+    if use_gpu:
+        return _solve_dense_gpu(pi, pj, lhs, rhs)
+    else:
+        return _solve_sparse_cpu(pi, pj, lhs, rhs)
+
+
+# Keep the original name as a public alias.
+def solve_scipy(
+    pi: torch.Tensor,
+    pj: torch.Tensor,
+    lhs: torch.Tensor,
+    rhs: torch.Tensor,
+) -> torch.Tensor:
+    return solve_linear_system(pi, pj, lhs, rhs)
 
 
 class Solver:
@@ -108,9 +186,7 @@ class Solver:
         pi, pj, lhs_data = lhs.ravel(ravel_mappings)
         rhs_data = rhs.ravel(ravel_mappings)
 
-        # print("Begin solution...")
-        x_data = solve_scipy(pi, pj, lhs_data, rhs_data)
-        # print("End solution...")
+        x_data = solve_linear_system(pi, pj, lhs_data, rhs_data)
 
         return rhs.unravel(x_data, ravel_mappings)
 
@@ -119,46 +195,48 @@ class Solver:
         rhs: SparseVectorDict = defaultdict(SparseNullVector)
 
         fully_fixed_groups = {t for t, inds in self.group_fixed_inds.items() if inds is None}
+        shared_cache = SharedProjectionCache() 
 
         energy = 0.0
-        for term, kernel in zip(self.terms, self.kernels):
-            # Compute the newest term formulation
-            term.update(self)
-            if not term.is_active():
-                continue
-            term_return = term.forward(variables, jacobian=True)
-            term_group_names = list(term.group_names().difference(fully_fixed_groups))
+        with profiler_section("solver.termloop"):
+            for term, kernel in zip(self.terms, self.kernels):
+                # Compute the newest term formulation
+                term.update(self)
+                if not term.is_active():
+                    continue
+                term_return = term.forward(variables, jacobian=True, shared_cache = shared_cache)
+                term_group_names = list(term.group_names().difference(fully_fixed_groups))
 
-            if kernel is not None:
-                term_return.apply_robust_kernel(kernel)
+                if kernel is not None:
+                    term_return.apply_robust_kernel(kernel)
 
-            if self.compute_energy:
-                energy += term_return.residual().sum().item()
+                if self.compute_energy:
+                    energy += term_return.residual().sum().item()
 
-            for group_name, fixed_inds in self.group_fixed_inds.items():
-                if group_name in term_group_names and fixed_inds is not None:
-                    term_return.remove_jcol_inds(group_name, fixed_inds)
+                for group_name, fixed_inds in self.group_fixed_inds.items():
+                    if group_name in term_group_names and fixed_inds is not None:
+                        term_return.remove_jcol_inds(group_name, fixed_inds)
 
-            # Compute RHS
-            for group_name in term_group_names:
-                rhs[group_name] += term_return.nwjtr(group_name)
+                # Compute RHS
+                for group_name in term_group_names:
+                    rhs[group_name] += term_return.nwjtr(group_name)
 
-            # Compute only upper triangular part of the LHS
-            for group_i in range(len(term_group_names)):
-                for group_j in range(group_i, len(term_group_names)):
-                    group_name_i = term_group_names[group_i]
-                    group_name_j = term_group_names[group_j]
-                    if group_name_i in term_group_names and group_name_j in term_group_names:
-                        jtwj = term_return.jtwj(group_name_i, group_name_j)
-                        lhs[(group_name_i, group_name_j)] += jtwj
+                # Compute only upper triangular part of the LHS
+                for group_i in range(len(term_group_names)):
+                    for group_j in range(group_i, len(term_group_names)):
+                        group_name_i = term_group_names[group_i]
+                        group_name_j = term_group_names[group_j]
+                        if group_name_i in term_group_names and group_name_j in term_group_names:
+                            jtwj = term_return.jtwj(group_name_i, group_name_j)
+                            lhs[(group_name_i, group_name_j)] += jtwj
 
-        all_group_names = list(rhs.keys())
-        marginalized_group_names = [
-            group_name
-            for group_name, marginalized in self.group_marginalized.items()
-            if marginalized and group_name in all_group_names
-        ]
-        regular_group_names = list(set(all_group_names).difference(marginalized_group_names))
+            all_group_names = list(rhs.keys())
+            marginalized_group_names = [
+                group_name
+                for group_name, marginalized in self.group_marginalized.items()
+                if marginalized and group_name in all_group_names
+            ]
+            regular_group_names = list(set(all_group_names).difference(marginalized_group_names))
 
         for group_name in all_group_names:
             damping = self.group_damping.get(group_name, 0.0)
@@ -166,28 +244,30 @@ class Solver:
             lhs[(group_name, group_name)].apply_damping_assume_coalesced(damping, ep)
 
         # Build matrices
-        lhs_h = SparseMatrixSubview(lhs, regular_group_names, regular_group_names)
-        rhs_v = SparseVectorSubview(rhs, regular_group_names)
+        with profiler_section("solver.build_matrices"):
+            lhs_h = SparseMatrixSubview(lhs, regular_group_names, regular_group_names)
+            rhs_v = SparseVectorSubview(rhs, regular_group_names)
 
-        if len(marginalized_group_names) > 0:
-            lhs_e = SparseMatrixSubview(lhs, regular_group_names, marginalized_group_names)
-            lhs_c = SparseMatrixSubview(lhs, marginalized_group_names, marginalized_group_names)
-            rhs_w = SparseVectorSubview(rhs, marginalized_group_names)
+        with profiler_section("solver.solve"):
+            if len(marginalized_group_names) > 0:
+                lhs_e = SparseMatrixSubview(lhs, regular_group_names, marginalized_group_names)
+                lhs_c = SparseMatrixSubview(lhs, marginalized_group_names, marginalized_group_names)
+                rhs_w = SparseVectorSubview(rhs, marginalized_group_names)
 
-            # Apply Schur's formula
-            h_cinv = lhs_e @ lhs_c.inverse()
-            lhs_reg = lhs_h - h_cinv @ lhs_e.transpose()
-            rhs_reg = rhs_v - h_cinv * rhs_w
+                # Apply Schur's formula
+                h_cinv = lhs_e @ lhs_c.inverse()
+                lhs_reg = lhs_h - h_cinv @ lhs_e.transpose()
+                rhs_reg = rhs_v - h_cinv * rhs_w
 
-            x_reg: SparseVectorSubview = self._solve(lhs_reg, rhs_reg)
+                x_reg: SparseVectorSubview = self._solve(lhs_reg, rhs_reg)
 
-            rhs_marg = rhs_w - lhs_e.transpose() * x_reg
-            x_marg: SparseVectorSubview = self._solve(lhs_c, rhs_marg)
+                rhs_marg = rhs_w - lhs_e.transpose() * x_reg
+                x_marg: SparseVectorSubview = self._solve(lhs_c, rhs_marg)
 
-            x_dict = x_reg.get_dict() | x_marg.get_dict()
+                x_dict = x_reg.get_dict() | x_marg.get_dict()
 
-        else:
-            x_dict = self._solve(lhs_h, rhs_v).get_dict()
+            else:
+                x_dict = self._solve(lhs_h, rhs_v).get_dict()
 
         for group_name in all_group_names:
             self.group_retractor[group_name].oplus(
@@ -197,3 +277,102 @@ class Solver:
             )
 
         return energy
+
+
+    # used for timing
+    # def run_inplace(self, variables: dict[str, Any]) -> float:
+    #     import time
+    #     timings = {}
+
+    #     lhs: SparseBlockMatrixDict = defaultdict(SparseNullMatrix)
+    #     rhs: SparseVectorDict = defaultdict(SparseNullVector)
+
+    #     fully_fixed_groups = {t for t, inds in self.group_fixed_inds.items() if inds is None}
+    #     shared_cache = SharedProjectionCache()
+
+    #     energy = 0.0
+
+    #     t0 = time.perf_counter()
+    #     for term, kernel in zip(self.terms, self.kernels):
+    #         term.update(self)
+    #         if not term.is_active():
+    #             continue
+    #         term_return = term.forward(variables, jacobian=True, shared_cache=shared_cache)
+    #         term_group_names = list(term.group_names().difference(fully_fixed_groups))
+
+    #         if kernel is not None:
+    #             term_return.apply_robust_kernel(kernel)
+
+    #         if self.compute_energy:
+    #             energy += term_return.residual().sum().item()
+
+    #         for group_name, fixed_inds in self.group_fixed_inds.items():
+    #             if group_name in term_group_names and fixed_inds is not None:
+    #                 term_return.remove_jcol_inds(group_name, fixed_inds)
+
+    #         for group_name in term_group_names:
+    #             rhs[group_name] += term_return.nwjtr(group_name)
+
+    #         for group_i in range(len(term_group_names)):
+    #             for group_j in range(group_i, len(term_group_names)):
+    #                 group_name_i = term_group_names[group_i]
+    #                 group_name_j = term_group_names[group_j]
+    #                 if group_name_i in term_group_names and group_name_j in term_group_names:
+    #                     jtwj = term_return.jtwj(group_name_i, group_name_j)
+    #                     lhs[(group_name_i, group_name_j)] += jtwj
+    #     timings["term_loop"] = time.perf_counter() - t0
+
+    #     all_group_names = list(rhs.keys())
+    #     marginalized_group_names = [
+    #         group_name
+    #         for group_name, marginalized in self.group_marginalized.items()
+    #         if marginalized and group_name in all_group_names
+    #     ]
+    #     regular_group_names = list(set(all_group_names).difference(marginalized_group_names))
+
+    #     t0 = time.perf_counter()
+    #     for group_name in all_group_names:
+    #         damping = self.group_damping.get(group_name, 0.0)
+    #         ep = self.group_ep.get(group_name, 0.0)
+    #         lhs[(group_name, group_name)].apply_damping_assume_coalesced(damping, ep)
+    #     timings["damping"] = time.perf_counter() - t0
+
+    #     t0 = time.perf_counter()
+    #     lhs_h = SparseMatrixSubview(lhs, regular_group_names, regular_group_names)
+    #     rhs_v = SparseVectorSubview(rhs, regular_group_names)
+
+    #     if len(marginalized_group_names) > 0:
+    #         lhs_e = SparseMatrixSubview(lhs, regular_group_names, marginalized_group_names)
+    #         lhs_c = SparseMatrixSubview(lhs, marginalized_group_names, marginalized_group_names)
+    #         rhs_w = SparseVectorSubview(rhs, marginalized_group_names)
+    #     timings["build_matrices"] = time.perf_counter() - t0
+
+    #     t0 = time.perf_counter()
+    #     if len(marginalized_group_names) > 0:
+    #         h_cinv = lhs_e @ lhs_c.inverse()
+    #         lhs_reg = lhs_h - h_cinv @ lhs_e.transpose()
+    #         rhs_reg = rhs_v - h_cinv * rhs_w
+
+    #         x_reg: SparseVectorSubview = self._solve(lhs_reg, rhs_reg)
+
+    #         rhs_marg = rhs_w - lhs_e.transpose() * x_reg
+    #         x_marg: SparseVectorSubview = self._solve(lhs_c, rhs_marg)
+
+    #         x_dict = x_reg.get_dict() | x_marg.get_dict()
+    #     else:
+    #         x_dict = self._solve(lhs_h, rhs_v).get_dict()
+    #     timings["solve"] = time.perf_counter() - t0
+
+    #     t0 = time.perf_counter()
+    #     for group_name in all_group_names:
+    #         self.group_retractor[group_name].oplus(
+    #             variables[group_name],
+    #             x_dict[group_name].inds,
+    #             x_dict[group_name].data,
+    #         )
+    #     timings["retract"] = time.perf_counter() - t0
+
+    #     timings["total"] = sum(timings.values())
+    #     print({k: f"{v*1000:.2f}ms" for k, v in timings.items()})
+
+    #     return energy

@@ -20,6 +20,11 @@ import torch
 
 from vipe.streams.base import ProcessedVideoStream, StreamList, VideoFrame, VideoStream
 
+import re
+
+def _natural_sort_key(p: Path):
+    return [int(s) if s.isdigit() else s.lower() for s in re.split(r'(\d+)', p.name)]
+
 
 class FrameDirStream(VideoStream):
     """
@@ -45,7 +50,7 @@ class FrameDirStream(VideoStream):
             self.frame_files.extend(sorted(path.glob(f'*{ext}')))
             self.frame_files.extend(sorted(path.glob(f'*{ext.upper()}')))
         
-        self.frame_files = sorted(list(set(self.frame_files)))
+        self.frame_files = sorted(set(self.frame_files), key=_natural_sort_key)
         
         if not self.frame_files:
             raise ValueError(f"No image files found in directory: {path}")

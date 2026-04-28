@@ -16,6 +16,7 @@
 import logging
 import tempfile
 import zipfile
+import itertools
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -255,32 +256,43 @@ def read_rgb_artifacts(rgb_file_path: Path) -> Iterator[tuple[int, torch.Tensor]
         yield frame_idx, rgb
 
 
-def save_depth_artifacts(out_path: ArtifactPath, cached_final_stream: VideoStream, gt: bool = False) -> None:
-    # Save metric depth as zipped exr files.
+def save_depth_artifacts(
+    out_path: ArtifactPath,
+    cached_final_stream: VideoStream,
+    gt: bool = False,
+) -> None:
+    """Save metric depth as zipped EXR files, streaming one frame at a time."""
     if gt:
-        metric_depth_list = cached_final_stream.get_gt_stream_attribute(FrameAttribute.METRIC_DEPTH)
+        metric_depth_list = cached_final_stream.get_stream_attribute_cpu(FrameAttribute.METRIC_DEPTH)
         path = out_path.eval_gt_depth_path
     else:
-        metric_depth_list = cached_final_stream.get_stream_attribute(FrameAttribute.METRIC_DEPTH)
+        metric_depth_list = cached_final_stream.get_stream_attribute_cpu(FrameAttribute.METRIC_DEPTH)
         path = out_path.depth_path
 
-    metric_depth_list = [
-        (frame_idx, depth_data.cpu().numpy())
-        for frame_idx, depth_data in enumerate(metric_depth_list)
-        if depth_data is not None
-    ]
-    if len(metric_depth_list) > 0:
-        path.parent.mkdir(exist_ok=True, parents=True)
-        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
-            for frame_idx, metric_depth in metric_depth_list:
-                height, width = metric_depth.shape
-                header = OpenEXR.Header(width, height)
-                header["channels"] = {"Z": Imath.Channel(Imath.PixelType(Imath.PixelType.HALF))}
-                with tempfile.NamedTemporaryFile(suffix=".exr") as f:
-                    exr = OpenEXR.OutputFile(f.name, header)
-                    exr.writePixels({"Z": metric_depth.astype(np.float16).tobytes()})
-                    exr.close()
-                    z.write(f.name, f"{frame_idx:05d}.exr")
+    # Filter to frames that actually have depth, pairing each with its index.
+    depth_iter = (
+        (frame_idx, depth)
+        for frame_idx, depth in enumerate(metric_depth_list)
+        if depth is not None
+    )
+
+    # Peek to see if there's at least one entry before creating the file.
+    first = next(depth_iter, None)
+    if first is None:
+        return
+
+    path.parent.mkdir(exist_ok=True, parents=True)
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        for frame_idx, depth_tensor in itertools.chain([first], depth_iter):
+            metric_depth = depth_tensor.numpy()
+            height, width = metric_depth.shape
+            header = OpenEXR.Header(width, height)
+            header["channels"] = {"Z": Imath.Channel(Imath.PixelType(Imath.PixelType.HALF))}
+            with tempfile.NamedTemporaryFile(suffix=".exr") as f:
+                exr = OpenEXR.OutputFile(f.name, header)
+                exr.writePixels({"Z": metric_depth.astype(np.float16).tobytes()})
+                exr.close()
+                z.write(f.name, f"{frame_idx:05d}.exr")
 
 
 def read_depth_artifacts(zip_file_path: Path) -> Iterator[tuple[int, torch.Tensor]]:

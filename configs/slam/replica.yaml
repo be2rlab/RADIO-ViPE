@@ -46,8 +46,8 @@ map_filter_thresh: 0.05
 visualize: false
 # Use keyframe depth for recovering metric depth
 keyframe_depth: metric3d-small
-use_semantic_flow_init: true
-
+use_semantic_flow_init: false
+pca_state_path: "/home/user/km-vipe/vipe_results/vipe/pca_basis.pt"
 
 sequence_name: room0
 
@@ -66,14 +66,14 @@ ba:
     output_dir: replica_results/debug_embedding
 
 # Initialize keyframe disparity from monocular depth prior instead of propagating mean
-use_depth_prior_init: true
+use_depth_prior_init: false
 
 embedding_covisibility:
-  enabled: true
-  weight: 4.0
+  enabled: false
+  weight: 5.0
 
 loop_closure:
-  enabled: true
+  enabled: false
   similarity_thresh: 0.85
   min_interval: 20
   max_candidates: 3
@@ -83,7 +83,7 @@ loop_closure:
 adaptive_frontend_iters:
   enabled: false
   min_iters1: 2
-  max_iters1: 6
+  max_iters1: 5
   min_iters2: 1
   max_iters2: 3
   convergence_thresh: 0.025

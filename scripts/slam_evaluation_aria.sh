@@ -3,15 +3,15 @@
 export ROOT_DIR=/home/user/km-vipe
 export GT_FOLDER=/data/aria_Replica/
 export RESULTS_FOLDER=$ROOT_DIR/aria_results
-export DATASET_NAME="aria"
+export DATASET_NAME="aria" 
 export SCENE_NAMES=(
 Apartment_release_clean_seq134_M1292    
 Apartment_release_multiuser_clean_seq112_M1292        
-# Apartment_release_multiuser_party_seq140_M1292
-# Apartment_release_multiskeleton_party_seq101_M1292
-# Apartment_release_multiskeleton_party_seq102_M1292
-# Apartment_release_meal_skeleton_seq133_M1292
-# Apartment_release_decoration_skeleton_seq131_M1292
+Apartment_release_multiuser_party_seq140_M1292
+Apartment_release_multiskeleton_party_seq101_M1292
+Apartment_release_multiskeleton_party_seq102_M1292
+Apartment_release_meal_skeleton_seq133_M1292
+Apartment_release_decoration_skeleton_seq131_M1292
 )
 
 for SCENE_NAME in ${SCENE_NAMES[*]}
@@ -30,7 +30,9 @@ do
         streams.dataset_name=$DATASET_NAME \
         pipeline.output.save_artifacts=true \
         pipeline.output.path=$RESULTS_FOLDER \
-        # pipeline.slam.dataset.sequence_name=$SCENE_NAME \
+        profiler.output=$RESULTS_FOLDER/profiling/${SCENE_NAME}.txt \
+        pipeline.slam.pca_state_path=$RESULTS_FOLDER/vipe/${SCENE_NAME}_pca_basis.pt \
+        pipeline.slam.sequence_name=$SCENE_NAME \
         # pipeline.slam.keyframe_depth=dataset \
 
     python $ROOT_DIR/scripts/rmse_evaluation.py \

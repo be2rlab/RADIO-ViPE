@@ -1,0 +1,3 @@
+dataset_name: scannet
+dataset_path: /data/
+sequence_name: scene0011_00

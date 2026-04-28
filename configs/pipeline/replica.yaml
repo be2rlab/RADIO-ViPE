@@ -6,7 +6,7 @@ instance: vipe.pipeline.default.DefaultAnnotationPipeline
 # Init configs
 init:
   camera_type: "pinhole"
-  intrinsics: "file"
+  intrinsics: "geocalib"
   intrinsics_path: "/data/Replica/cam_params.json"
   instance: null
     # kf_gap_sec: 2.0
@@ -21,10 +21,12 @@ slam:
   model_family: "radseg"
   model_variant: "c-radio_v3-b"
   radseg_lang_model: "siglip2"
-  radseg_slide_crop: 224
-  radseg_slide_stride: 160
-  radseg_lang_align: False
-  pca_dim: 256
+  radseg_slide_crop: 336
+  radseg_slide_stride: 224
+  radseg_lang_align: True
+  pca_dim: null
+  pca_state_path: "/home/user/km-vipe/vipe_results/vipe/pca_basis.pt"
+
 
 # Post-processing configs
 post:
@@ -38,7 +40,6 @@ output:
 
   # Save artifacts and a info file
   save_artifacts: false
-
   save_slam_map: true
 
   # Visualization videos to BASE_PATH/vipe/xxx.mp4
