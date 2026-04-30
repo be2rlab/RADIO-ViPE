@@ -2,7 +2,7 @@
 
 > **BE2R Lab** — Biomechatronics and Energy-Efficient Robotics Laboratory, ITMO University
 
-🌐 **Project Page**: [be2rlab.github.io/radio_vipe](https://be2rlab.github.io/radio_vipe/) &nbsp;|&nbsp; 📄 **Paper**: (https://arxiv.org/pdf/2604.26067)
+🌐 **Project Page**: [be2rlab.github.io/radio_vipe](https://be2rlab.github.io/radio_vipe/) &nbsp;|&nbsp; 📄 **Paper**: https://arxiv.org/pdf/2604.26067
 
 ---
 
