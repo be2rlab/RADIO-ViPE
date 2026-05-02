@@ -1,0 +1,54 @@
+defaults:
+  - /default
+  - override /dataset: scannet
+  - override /encoder: radseg
+  - override /mapping: semantic_voxel_map
+  - override /feat_compressor: pca
+  - _self_
+
+eval_out: eval_out/km-vipe
+load_external_gt: false
+load_external_pred: true
+pred_dir: /workspace/RayFronts/pred_pcds/
+first_pose_dir: /data/scannet_v2/exported
+prediction_thresh: 0.1
+prompt_denoising_thresh: 0.5
+k: 5
+lang_feats: true
+
+hydra:
+  sweeper:
+    params:
+      dataset.scene_name: scene0231_00,scene0231_01,scene0231_02,scene0378_00,scene0378_01,scene0378_02,scene0518_00
+
+dataset:
+  path: "/data/scannet_v2/exported"
+  scene_name: scene0011_00
+  rgb_resolution: [480, 640]
+  depth_resolution: [480, 640]
+  frame_skip: 10
+
+mapping:
+  vox_size: 0.05
+  vox_accum_period: 4
+  max_pts_per_frame: -1
+
+encoder:
+  model_version: c-radio_v3-b
+  lang_model: siglip2
+  compile: false
+  amp: true
+
+feat_compressor:
+  out_dim: 256
+
+querying:
+  text_query_mode: labels
+
+# Comment out the line below and uncomment the next one 
+# to include the background classes in evaluation as well
+classes_to_ignore: ['otherprop', 'otherstructure', 'otherfurniture', 
+                    'wall', 'floor', 'ceiling', 'door', 'window', 'background']
+# classes_to_ignore: ['otherprop', 'otherstructure', 'otherfurniture']
+
+no_caching: true

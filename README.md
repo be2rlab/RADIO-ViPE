@@ -51,7 +51,27 @@ python run.py pipeline=default streams=raw_mp4_stream streams.base_path=YOUR_VID
 
 ## Evaluation
 
-Documentation and evaluation scripts are coming soon.
+### Semantic Segmentation evaluation
+
+Semantic segmentation evaluation uses code borrowed from the [RayFronts](https://github.com/RayFronts/RayFronts) repository.
+
+Run evaluation with one of the prepared configs:
+
+```bash
+python scripts/semseg_eval.py --config-name semseg_configs/replica_kmvipe
+```
+
+Expected outputs are saved under `eval_out/<experiment>/<DatasetName>/<scene>/`.
+
+### RMSE evaluation
+
+RMSE evaluation is performed using the shell scripts provided in `scripts/`, for example:
+
+```bash
+scripts/slam_evaluation_replica.sh
+```
+
+These scripts run the SLAM pipeline on the corresponding dataset and compute RMSE metrics for the generated trajectories.
 
 ---
 

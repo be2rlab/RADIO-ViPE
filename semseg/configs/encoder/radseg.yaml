@@ -1,0 +1,12 @@
+_target_: semseg.image_encoders.RADSegEncoder
+model_version: c-radio_v3-b
+lang_model: siglip2
+scra_scaling: 10.0
+scga_scaling: 10.0
+return_radio_features: true
+compile: ${compile}
+amp: ${amp}
+predict: false
+slide_crop: 0
+slide_stride: 224
+sam_refinement: false

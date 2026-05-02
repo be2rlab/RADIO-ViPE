@@ -1,0 +1,52 @@
+defaults:
+  - /default
+  - override /dataset: niceslam_replica
+  - override /mapping: semantic_voxel_map
+  - override /encoder: radseg
+  - override /feat_compressor: pca
+  - _self_
+
+eval_out: eval_out/km-vipe/
+load_external_gt: true
+gt_dir: /data/NiceReplicaDataset/
+load_external_pred: true
+pred_dir: /workspace/RayFronts/pred_pcds/
+first_pose_dir: /data/Replica # trajectory dir for loading the first pose
+prediction_thresh: 0.1
+prompt_denoising_thresh: 0.5
+k: 5
+lang_feats: true
+
+hydra:
+  sweeper:
+    params:
+      dataset.scene_name: office0,office1,office2,office3,office4,room0,room1,room2
+
+dataset:
+  path: "/data/Replica"
+  scene_name: room0
+  rgb_resolution: [480, 640]
+  depth_resolution: [480, 640]
+  frame_skip: 10
+
+encoder:
+  model_version: c-radio_v3-b
+  lang_model: siglip2
+  compile: false
+  amp: false
+
+feat_compressor:
+  out_dim: 256
+
+mapping:
+  vox_size: 0.05
+  vox_accum_period: 4
+  max_pts_per_frame: -1
+
+querying:
+  text_query_mode: labels
+
+# Comment out the line below to include the background classes in evaluation as well
+classes_to_ignore: ["wall", "floor", "ceiling", "door", "window", "background"]
+
+no_caching: true

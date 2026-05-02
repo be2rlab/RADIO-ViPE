@@ -1,0 +1,22 @@
+defaults:
+  - _self_
+  - dataset: niceslam_replica
+  - mapping: semantic_voxel_map
+  - encoder: radseg
+  - feat_compressor: null
+
+hydra:
+  output_subdir: null
+  run:
+    dir: .
+
+batch_size: 1
+depth_limit: -1
+interp_mode: bilinear
+compile: false
+amp: true
+seed: 17
+
+querying:
+  text_query_mode: labels
+  compressed: false
