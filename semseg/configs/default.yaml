@@ -4,6 +4,7 @@ defaults:
   - mapping: semantic_voxel_map
   - encoder: radseg
   - feat_compressor: null
+  - extras
 
 hydra:
   output_subdir: null

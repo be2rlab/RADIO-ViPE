@@ -51,6 +51,10 @@ RUN pip install ftfy regex tqdm
 RUN pip install transformers==4.52
 RUN pip install segment-anything-py
 
+RUN TORCH_VER=$(python3 -c "import torch; print(torch.__version__.split('+')[0])") && \
+    CUDA_VER=$(python3 -c "import torch; print('cu' + torch.version.cuda.replace('.', ''))") && \
+    pip install torch-scatter -f "https://data.pyg.org/whl/torch-${TORCH_VER}+${CUDA_VER}.html"
+
 WORKDIR /home/${USER}/km-vipe
 
 CMD ["/bin/bash"]

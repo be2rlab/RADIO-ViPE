@@ -44,6 +44,7 @@ cs.store(name="extras", node=SemSegEvalConfig)
 class SemSegEval:
     def __init__(self, cfg):
         self.cfg = cfg
+        cfg.mapping.feat_compressor = cfg.get('feat_compressor')
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         # Explicitly reference local package classes to avoid ambiguous hydra imports.
         _ = datasets, mapping, image_encoders, feat_compressors
@@ -124,22 +125,49 @@ class SemSegEval:
         fiou = (freq / torch.sum(freq)) * iou
         return dict(tp=tp, fp=fp, fn=fn, tn=tn, iou=iou, fiou=fiou, miou=torch.nanmean(iou), fmiou=torch.nansum(fiou), acc=torch.mean((aligned_preds[gt != 0] == gt[gt != 0]).float()))
 
-    def save_metrics(self, m: OrderedDict):
+    def save_metrics(self, m: OrderedDict, prefix: str = "semseg"):
         if not self.store_output:
             return
+
         last_m = next(reversed(m.values()))
+        
         class_wise_metrics = [k for k, v in last_m.items() if v.dim() > 0]
-        rows = ["index,label," + ",".join(class_wise_metrics) + "\n"]
+        cw_rows = ["index,label," + ",".join(class_wise_metrics) + "\n"]
         for i in range(self.num_classes - 1):
             fields = [str(i + 1), str(self.dataset._cat_index_to_name[i + 1])]
             fields.extend([str(last_m[k][i].item()) for k in class_wise_metrics])
-            rows.append(",".join(fields) + "\n")
-        with open(os.path.join(self.cache_scene_dir, "semseg_final_class_results.csv"), "w", encoding="utf-8") as f:
-            f.writelines(rows)
+            cw_rows.append(",".join(fields) + "\n")
+        
+        with open(os.path.join(self.cache_scene_dir, f"{prefix}_final_class_results.csv"), "w", encoding="utf-8") as f:
+            f.writelines(cw_rows)
+
         aggregate_metrics = [k for k, v in last_m.items() if v.dim() == 0]
-        with open(os.path.join(self.cache_scene_dir, "semseg_final_summary_results.csv"), "w", encoding="utf-8") as f:
-            f.write("scene_name," + ",".join(aggregate_metrics) + "\n")
-            f.write(",".join([self.dataset.scene_name] + [str(last_m[k].item()) for k in aggregate_metrics]) + "\n")
+        header = "scene_name," + ",".join(aggregate_metrics) + "\n"
+        current_scene_row = ",".join([self.dataset.scene_name] + [str(last_m[k].item()) for k in aggregate_metrics]) + "\n"
+        
+        with open(os.path.join(self.cache_scene_dir, f"{prefix}_final_summary_results.csv"), "w", encoding="utf-8") as f:
+            f.write(header + current_scene_row)
+
+        global_results_path = os.path.join(self.cfg.eval_out, 
+                                        self.dataset.__class__.__name__, 
+                                        f"{prefix}_global_summary_results.csv")
+        
+        os.makedirs(os.path.dirname(global_results_path), exist_ok=True)
+        
+        all_rows = [header]
+        if os.path.exists(global_results_path):
+            with open(global_results_path, "r", encoding="utf-8") as f:
+                existing_content = f.readlines()
+            
+            all_rows = [existing_content[0]]
+            for line in existing_content[1:]:
+                if not line.startswith(self.dataset.scene_name + ","):
+                    all_rows.append(line)
+        
+        all_rows.append(current_scene_row)
+        
+        with open(global_results_path, "w", encoding="utf-8") as f:
+            f.writelines(all_rows)
 
     def run(self):
         eval_utils.reset_seed(self.cfg.seed)
@@ -152,7 +180,7 @@ class SemSegEval:
             encoder_kwargs["classes"] = self.dataset.cat_index_to_name[1:]
         self.encoder = hydra.utils.instantiate(self.cfg.encoder, **encoder_kwargs)
 
-        if self.cfg.load_external_pred and self.cfg.mapping.get("feat_compressor"):
+        if self.cfg.load_external_pred and "feat_compressor" in self.cfg.mapping and self.cfg.mapping.feat_compressor is not None:
             pca_path = os.path.join(self.cfg.pred_dir, self.cfg.dataset.scene_name + "_pca_basis.pt")
             pca_data = torch.load(pca_path, weights_only=False)
             mean = pca_data["mean"]
@@ -172,9 +200,22 @@ class SemSegEval:
         names = self.dataset.cat_index_to_name[1:]
         text_embeds = self.encoder.encode_labels(names) if self.cfg.querying.text_query_mode == "labels" else self.encoder.encode_prompts(names)
         feats_xyz, feats_feats = self.load_external_preds()
-        feats_lang = feats_feats.float() if self.cfg.lang_feats else self.encoder.align_spatial_features_with_language(
-            feats_feats.unsqueeze(-1).unsqueeze(-1).float()
-        ).squeeze(-1).squeeze(-1)
+
+        if self.feat_compressor is not None:
+            if not self.feat_compressor.is_fitted():
+                self.feat_compressor.fit(feats_feats)
+        
+        if (self.feat_compressor is not None and 
+                not self.cfg.querying.compressed):
+            feats_feats = self.feat_compressor.decompress(feats_feats)
+
+        if self.cfg.load_external_pred and self.cfg.lang_feats:
+            feats_lang = feats_feats.float()
+        else:
+            feats_lang = self.encoder.align_spatial_features_with_language(
+                feats_feats.unsqueeze(-1).unsqueeze(-1).float() 
+            ).squeeze(-1).squeeze(-1)
+
         semseg_pred_label = eval_utils.compute_semseg_preds(
             feats_lang.float(),
             text_embeds.float(),
@@ -190,8 +231,8 @@ class SemSegEval:
 
 @hydra.main(version_base="1.2", config_path="configs", config_name="default")
 @torch.inference_mode()
-def main(cfg=None):
-    SemSegEval(cfg).run()
+def main(cfg=None):    
+    SemSegEval(cfg["semseg_configs"]).run()
 
 
 if __name__ == "__main__":

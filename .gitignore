@@ -188,3 +188,6 @@ trt_artifacts/
 replica_results_*/
 tum_results_*/
 vipe_results_scannet/
+outputs/
+eval_out/
+multirun/

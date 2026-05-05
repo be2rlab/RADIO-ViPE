@@ -61,6 +61,14 @@ Run evaluation with one of the prepared configs:
 python scripts/semseg_eval.py --config-name semseg_configs/replica_kmvipe
 ```
 
+If you want to run evaluation for all the scenes:
+```bash
+python scripts/semseg_eval.py \
+  --config-name semseg_configs/replica_kmvipe \
+  --multirun \
+  semseg_configs.dataset.scene_name=office0,office1,office2,office3,office4,room0,room1,room2
+```
+
 Expected outputs are saved under `eval_out/<experiment>/<DatasetName>/<scene>/`.
 
 ### RMSE evaluation

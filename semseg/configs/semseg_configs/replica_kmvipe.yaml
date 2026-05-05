@@ -3,24 +3,20 @@ defaults:
   - override /dataset: niceslam_replica
   - override /mapping: semantic_voxel_map
   - override /encoder: radseg
-  - override /feat_compressor: pca
+  # - override /feat_compressor: pca
   - _self_
 
 eval_out: eval_out/km-vipe/
 load_external_gt: true
 gt_dir: /data/NiceReplicaDataset/
 load_external_pred: true
-pred_dir: /workspace/RayFronts/pred_pcds/
+pred_dir: /home/user/km-vipe/
 first_pose_dir: /data/Replica # trajectory dir for loading the first pose
 prediction_thresh: 0.1
 prompt_denoising_thresh: 0.5
 k: 5
 lang_feats: true
 
-hydra:
-  sweeper:
-    params:
-      dataset.scene_name: office0,office1,office2,office3,office4,room0,room1,room2
 
 dataset:
   path: "/data/Replica"
@@ -35,8 +31,8 @@ encoder:
   compile: false
   amp: false
 
-feat_compressor:
-  out_dim: 256
+# feat_compressor:
+#   out_dim: 256
 
 mapping:
   vox_size: 0.05
