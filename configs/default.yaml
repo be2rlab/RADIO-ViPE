@@ -2,13 +2,13 @@ defaults:
   - _self_
   - streams: frame_dir_stream # raw_mp4_stream
   - pipeline: ???
-  - profiler: default
+#  - profiler: default
   - override hydra/hydra_logging: none
   - override hydra/job_logging: disabled
 
 ray: false
-prefiler: true
-memory_profiler: true
+#prefiler: true
+#memory_profiler: true
 
 hydra:
   output_subdir: null
