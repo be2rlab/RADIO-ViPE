@@ -178,12 +178,11 @@ class RADSegEncoder(ImageSemSegEncoder):
       adaptor_names = [lang_model, "sam3"]
     else:
       adaptor_names = [lang_model, "sam"]
-    self.model = torch.hub.load("/root/.cache/torch/hub/NVlabs-RADIO-fbd19ec", "radio_model",
+    self.model = torch.hub.load("NVlabs/RADIO", "radio_model",
                                 version=model_version, progress=True,
                                 skip_validation=True,
                                 adaptor_names=adaptor_names,
-                                force_reload=False,
-                                source='local')
+                                force_reload=False)
     self.model.eval()
     self.model = self.model.to(self.device)
     # Steal adaptors from RADIO so it does not auto compute adaptor output.
