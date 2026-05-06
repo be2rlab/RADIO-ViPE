@@ -37,7 +37,7 @@ do
         streams.scene_name=$SCENE_NAME \
         pipeline.output.save_artifacts=true \
         pipeline.output.path=$RESULTS_FOLDER \
-        profiler.output=$RESULTS_FOLDER/profiling/${SCENE_NAME}.txt
+        profiler.output=$RESULTS_FOLDER/profiling/${SCENE_NAME}.txt \
         pipeline.slam.sequence_name=$SCENE_NAME \
         # pipeline.slam.keyframe_depth=dataset \
 

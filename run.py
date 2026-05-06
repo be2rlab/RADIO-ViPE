@@ -100,9 +100,6 @@ def run(args: DictConfig) -> None:
 
     if memory_profiling:
         logger.info("Final memory state:\n%s", torch.cuda.memory_summary())
-        logger.info(
-            "Visualize snapshots with: python -m torch.utils.viz._memory_viz trace_plot <snapshot.pkl> -o trace.html"
-        )
 
     if profiling_enabled:
         min_percentage = float(getattr(profiler_cfg, "min_percentage", 0.0)) if profiler_cfg is not None else 0.0
