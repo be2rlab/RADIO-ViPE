@@ -40,15 +40,15 @@ class PcaCompressor(FeatCompressor):
         self.mean = d["mean"]
         self.basis = d["basis"]
 
-    def compress(self, x: torch.FloatTensor) -> torch.FloatTensor:
-        shape = list(x.shape)
-        shape[-1] = self.out_dim
-        return ((x.flatten(0, -2) - self.mean) @ self.basis).reshape(*shape)
+    def compress(self, X):
+        s = list(X.shape)
+        s[-1] = self.out_dim
+        return (X.flatten(0, -2) @ self.basis).reshape(*s)
 
-    def decompress(self, y: torch.FloatTensor) -> torch.FloatTensor:
-        shape = list(y.shape)
-        shape[-1] = self.in_dim
-        return (y.flatten(0, -2) @ self.basis.to(y.dtype).T + self.mean).reshape(*shape)
+    def decompress(self, Y):
+        s = list(Y.shape)
+        s[-1] = self.in_dim
+        return (Y.flatten(0, -2) @ self.basis.to(Y.dtype).T).reshape(*s)
 
     def is_fitted(self) -> bool:
         return self.mean is not None and self.basis is not None

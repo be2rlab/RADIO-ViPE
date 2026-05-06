@@ -35,8 +35,7 @@ RUN apt-get update && apt-get install -y \
 
 RUN pip install ultralytics \
                 segment-anything-py \
-                open-clip-torch \
-                transformers==5.3.0
+                open-clip-torch 
 # RUN git clone https://github.com/facebookresearch/dinov3.git /home/${USER}/dinov3
 
 COPY ../envs/ envs/

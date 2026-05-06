@@ -44,6 +44,7 @@ cs.store(name="extras", node=SemSegEvalConfig)
 class SemSegEval:
     def __init__(self, cfg):
         self.cfg = cfg
+        self.store_output = cfg.eval_out is not None and len(cfg.eval_out) > 0
         cfg.mapping.feat_compressor = cfg.get('feat_compressor')
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         # Explicitly reference local package classes to avoid ambiguous hydra imports.
@@ -52,7 +53,6 @@ class SemSegEval:
         self.dataset._init_semseg_mappings(self.dataset._cat_id_to_name, cfg.classes_to_eval, cfg.classes_to_ignore)
         self.num_classes = len(self.dataset._cat_index_to_id)
         self.dataloader = torch.utils.data.DataLoader(self.dataset, batch_size=cfg.batch_size)
-        self.store_output = bool(cfg.eval_out)
         scene_name = cfg.dataset.scene_name.replace("/", "_")
         cache_dataset_dir = os.path.join(cfg.eval_out, self.dataset.__class__.__name__)
         self.cache_scene_dir = os.path.join(cache_dataset_dir, scene_name)
@@ -88,7 +88,6 @@ class SemSegEval:
             semseg_gt_lifter.process_posed_rgbd(
                 batch["rgb_img"].cuda(), batch["depth_img"].cuda(), batch["pose_4x4"].cuda(), feat_img=semseg_onehot.float()
             )
-        semseg_gt_lifter.accum_semantic_voxels()
         text_embeds = gt_encoder.encode_labels(names)
         semseg_gt_xyz = semseg_gt_lifter.global_vox_xyz
         semseg_gt_label = eval_utils.compute_semseg_preds(
@@ -105,7 +104,7 @@ class SemSegEval:
 
     def load_external_preds(self):
         map_path = os.path.join(self.cfg.pred_dir, self.cfg.dataset.scene_name + "_slam_map.pt")
-        data = torch.load(map_path, weights_only=False)
+        data = torch.load(map_path)
         pred_xyz = data["dense_disp_xyz"].to(self.device)
         pred_feats = data["dense_disp_embeddings"].to(self.device)
         return self.align_points_to_global(pred_xyz), pred_feats
@@ -182,7 +181,7 @@ class SemSegEval:
 
         if self.cfg.load_external_pred and "feat_compressor" in self.cfg.mapping and self.cfg.mapping.feat_compressor is not None:
             pca_path = os.path.join(self.cfg.pred_dir, self.cfg.dataset.scene_name + "_pca_basis.pt")
-            pca_data = torch.load(pca_path, weights_only=False)
+            pca_data = torch.load(pca_path)
             mean = pca_data["mean"]
             components = pca_data["components"]
             out_dim = pca_data["metadata"]["target_dim"]
@@ -199,6 +198,13 @@ class SemSegEval:
 
         names = self.dataset.cat_index_to_name[1:]
         text_embeds = self.encoder.encode_labels(names) if self.cfg.querying.text_query_mode == "labels" else self.encoder.encode_prompts(names)
+        
+        if (self.feat_compressor is not None and
+                self.cfg.querying.compressed):
+            if not self.feat_compressor.is_fitted():
+                self.feat_compressor.fit(text_embeds)
+            text_embeds = self.feat_compressor.compress(text_embeds)
+        
         feats_xyz, feats_feats = self.load_external_preds()
 
         if self.feat_compressor is not None:

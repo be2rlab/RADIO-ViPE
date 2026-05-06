@@ -3,7 +3,7 @@ defaults:
   - override /dataset: niceslam_replica
   - override /mapping: semantic_voxel_map
   - override /encoder: radseg
-  # - override /feat_compressor: pca
+  - override /feat_compressor: pca
   - _self_
 
 eval_out: eval_out/km-vipe/
@@ -31,8 +31,8 @@ encoder:
   compile: false
   amp: false
 
-# feat_compressor:
-#   out_dim: 256
+feat_compressor:
+  out_dim: 256
 
 mapping:
   vox_size: 0.05
