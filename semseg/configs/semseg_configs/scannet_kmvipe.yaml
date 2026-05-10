@@ -9,17 +9,12 @@ defaults:
 eval_out: eval_out/km-vipe
 load_external_gt: false
 load_external_pred: true
-pred_dir: /workspace/RayFronts/pred_pcds/
+pred_dir: /home/user/km-vipe/
 first_pose_dir: /data/scannet_v2/exported
 prediction_thresh: 0.1
 prompt_denoising_thresh: 0.5
 k: 5
 lang_feats: true
-
-hydra:
-  sweeper:
-    params:
-      dataset.scene_name: scene0231_00,scene0231_01,scene0231_02,scene0378_00,scene0378_01,scene0378_02,scene0518_00
 
 dataset:
   path: "/data/scannet_v2/exported"
