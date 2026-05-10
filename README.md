@@ -55,6 +55,11 @@ python run.py pipeline=default streams=raw_mp4_stream streams.base_path=YOUR_VID
 
 Semantic segmentation evaluation uses code borrowed from the [RayFronts](https://github.com/RayFronts/RayFronts) repository.
 
+
+> For Replica, we use the NiceSlam version and we get the GT semantic labels from HOV-SG (Uploaded [here](https://cmu.app.box.com/s/x7si4h8y4sfk07dgmn9uwowaf2g74zjw) for convenience) since NiceSlam does not provide semantic labels without the original dataset.
+>
+> — *cited from [RayFronts](https://github.com/RayFronts/RayFronts)*.
+
 Run evaluation with one of the prepared configs:
 
 ```bash
