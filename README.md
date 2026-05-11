@@ -51,7 +51,40 @@ python run.py pipeline=default streams=raw_mp4_stream streams.base_path=YOUR_VID
 
 ## Evaluation
 
-Documentation and evaluation scripts are coming soon.
+### Semantic Segmentation evaluation
+
+Semantic segmentation evaluation uses code borrowed from the [RayFronts](https://github.com/RayFronts/RayFronts) repository.
+
+
+> For Replica, we use the NiceSlam version and we get the GT semantic labels from HOV-SG (Uploaded [here](https://cmu.app.box.com/s/x7si4h8y4sfk07dgmn9uwowaf2g74zjw) for convenience) since NiceSlam does not provide semantic labels without the original dataset.
+>
+> — *cited from [RayFronts](https://github.com/RayFronts/RayFronts)*.
+
+Run evaluation with one of the prepared configs:
+
+```bash
+python scripts/semseg_eval.py --config-name semseg_configs/replica_kmvipe
+```
+
+If you want to run evaluation for all the scenes:
+```bash
+python scripts/semseg_eval.py \
+  --config-name semseg_configs/replica_kmvipe \
+  --multirun \
+  semseg_configs.dataset.scene_name=office0,office1,office2,office3,office4,room0,room1,room2
+```
+
+Expected outputs are saved under `eval_out/<experiment>/<DatasetName>/<scene>/`.
+
+### RMSE evaluation
+
+RMSE evaluation is performed using the shell scripts provided in `scripts/`, for example:
+
+```bash
+scripts/slam_evaluation_replica.sh
+```
+
+These scripts run the SLAM pipeline on the corresponding dataset and compute RMSE metrics for the generated trajectories.
 
 ---
 

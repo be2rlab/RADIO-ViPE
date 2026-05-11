@@ -2,7 +2,7 @@
 
 export ROOT_DIR=/home/user/km-vipe
 export GT_FOLDER=/data/tum
-export RESULTS_FOLDER=$ROOT_DIR/tum_results_ablation1
+export RESULTS_FOLDER=$ROOT_DIR/tum_results
 export CUDA_VISIBLE_DEVICES=0
 export SCENE_NAMES=(
     # rgbd_dataset_freiburg1_360

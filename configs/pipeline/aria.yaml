@@ -52,7 +52,7 @@ slam:
   radseg_slide_stride: 224
   radseg_lang_align: True
   pca_dim: 128
-  pca_state_path: "/home/user/km-vipe/vipe_results/vipe/pca_basis.pt"
+  pca_state_path: "/home/user/km-vipe/aria_results/vipe/pca_basis.pt"
 
 
 # Post-processing configs

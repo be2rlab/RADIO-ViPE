@@ -22,7 +22,11 @@ dynamic = ["version"]
 dependencies = [
     "numpy",
     "einops",
+    "hydra-core",
     "omegaconf",
+    "pandas",
+    "scikit-learn",
+    "torch-scatter",
     "tqdm",
     "rerun-sdk",
     "imageio[ffmpeg]",
