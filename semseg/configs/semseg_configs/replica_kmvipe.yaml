@@ -3,6 +3,7 @@ defaults:
   - override /dataset: niceslam_replica
   - override /mapping: semantic_voxel_map
   - override /encoder: radseg
+  # make feat_compressor null to run with full length
   - override /feat_compressor: pca
   - _self_
 
@@ -15,7 +16,7 @@ first_pose_dir: /data/Replica # trajectory dir for loading the first pose
 prediction_thresh: 0.1
 prompt_denoising_thresh: 0.5
 k: 5
-lang_feats: true
+lang_feats: true # if predictions are in the SigLIP embedding space (if false then they are in RADIO space)
 
 
 dataset:
@@ -31,6 +32,7 @@ encoder:
   compile: false
   amp: false
 
+# Comment out 2 lines below to run with full length
 feat_compressor:
   out_dim: 256
 
