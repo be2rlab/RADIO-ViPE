@@ -148,9 +148,10 @@ class SLAMSystem:
             print(f"Using depth model: {self.metric_depth.depth_type}")
         else:
             print("No depth model used")
-        self.pca_state_path = Path(self.config.pca_state_path)
-        print(f"pca path is {self.pca_state_path}")
-        self._pca_state_saved = False
+        self.pca_dim = getattr(self.config, "pca_dim", None)
+        if self.pca_dim is not None:
+            self.pca_state_path = Path(getattr(self.config, "pca_state_path", "vipe_results/vipe/pca_basis.pt"))
+            self._pca_state_saved = False
         print(f"model_family: {self.config.model_family}, model_variant: {self.config.model_variant}")
         self.embedder = EmbeddingsPipeline(
             model_family = self.config.model_family,
@@ -178,8 +179,10 @@ class SLAMSystem:
     
 
     def _maybe_save_pca_state(self) -> None:
-        if self._pca_state_saved or self.pca_state_path is None:
+        if self.pca_dim is None or self._pca_state_saved or self.pca_state_path is None:
             return
+        if self.pca_state_path.is_dir() or self.pca_state_path.suffix == "":
+            self.pca_state_path = self.pca_state_path / "pca_basis.pt"
 
         projector = self.embedder.projector
         if projector is None or not projector.is_fit():

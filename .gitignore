@@ -181,13 +181,14 @@ tum_results
 **.npz
 **.packaging
 **.png
-aria_results/
+aria_results_*/
 **.pt
 **.csv
 experiments/*
 trt_artifacts/
 replica_results_*/
 tum_results_*/
+scannet_results_*/
 vipe_results_scannet/
 outputs/
 eval_out/
