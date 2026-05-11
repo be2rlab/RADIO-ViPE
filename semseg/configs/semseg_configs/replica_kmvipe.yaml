@@ -3,14 +3,14 @@ defaults:
   - override /dataset: niceslam_replica
   - override /mapping: semantic_voxel_map
   - override /encoder: radseg
-  - override /feat_compressor: pca
+  - override /feat_compressor: null
   - _self_
 
 eval_out: eval_out/km-vipe/
 load_external_gt: true
 gt_dir: /data/NiceReplicaDataset/
 load_external_pred: true
-pred_dir: /home/user/km-vipe/
+pred_dir: /home/user/km-vipe/replica_results_128/vipe/
 first_pose_dir: /data/Replica # trajectory dir for loading the first pose
 prediction_thresh: 0.1
 prompt_denoising_thresh: 0.5
@@ -31,8 +31,6 @@ encoder:
   compile: false
   amp: false
 
-feat_compressor:
-  out_dim: 256
 
 mapping:
   vox_size: 0.05

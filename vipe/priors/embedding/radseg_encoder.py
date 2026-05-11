@@ -181,7 +181,8 @@ class RADSegEncoder(ImageSemSegEncoder):
     self.model = torch.hub.load("NVlabs/RADIO", "radio_model",
                                 version=model_version, progress=True,
                                 skip_validation=True,
-                                adaptor_names=adaptor_names)
+                                adaptor_names=adaptor_names,
+                                verbose=False)
     self.model.eval()
     self.model = self.model.to(self.device)
     # Steal adaptors from RADIO so it does not auto compute adaptor output.

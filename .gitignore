@@ -183,6 +183,7 @@ tum_results
 **.png
 aria_results/
 **.pt
+**.csv
 experiments/*
 trt_artifacts/
 replica_results_*/
@@ -191,3 +192,7 @@ vipe_results_scannet/
 outputs/
 eval_out/
 multirun/
+replica_results/
+tum_results/
+scannet_results/
+aria_results/

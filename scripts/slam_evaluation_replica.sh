@@ -2,7 +2,7 @@
 
 export ROOT_DIR=/home/user/km-vipe
 export GT_FOLDER=/data/Replica
-export RESULTS_FOLDER=$ROOT_DIR/replica_master
+export RESULTS_FOLDER=$ROOT_DIR/replica_results
 export CUDA_VISIBLE_DEVICES=1
 export SCENE_NAMES=(
     room0

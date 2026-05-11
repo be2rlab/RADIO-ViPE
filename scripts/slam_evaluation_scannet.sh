@@ -2,7 +2,7 @@
 
 export ROOT_DIR=/home/user/km-vipe
 export GT_FOLDER=/data/scannet_v2/exported
-export RESULTS_FOLDER=$ROOT_DIR/vipe_results_scannet
+export RESULTS_FOLDER=$ROOT_DIR/scannet_results
 export CUDA_VISIBLE_DEVICES=0
 export SCENE_NAMES=(
     scene0011_00

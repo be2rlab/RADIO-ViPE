@@ -19,8 +19,8 @@ RUN apt-get update && \
 ENV NVIDIA_VISIBLE_DEVICES=all
 ENV NVIDIA_DRIVER_CAPABILITIES=graphics,utility,compute
 ENV QT_X11_NO_MITSHM=1
-
-# RUN git clone https://github.com/facebookresearch/dinov3.git /home/${USER}/dinov3
+# Silence the numexpr "detected N cores" noise at every run
+ENV NUMEXPR_MAX_THREADS=16
 
 COPY ../envs/ envs/
 RUN pip install -r envs/requirements.txt
@@ -41,6 +41,17 @@ RUN pip install ultralytics \
 RUN TORCH_VER=$(python3 -c "import torch; print(torch.__version__.split('+')[0])") && \
     CUDA_VER=$(python3 -c "import torch; print('cu' + torch.version.cuda.replace('.', ''))") && \
     pip install torch-scatter -f "https://data.pyg.org/whl/torch-${TORCH_VER}+${CUDA_VER}.html"
+
+# ── AOT-compile vipe_ext_jit so it lands in site-packages, not the JIT cache ──
+# We copy only the two things the build needs: the C++/CUDA sources and the
+# setup script. The workdir (/home/user/km-vipe) is volume-mounted at runtime
+# so we build in /tmp and let pip install the .so into the Python environment.
+COPY csrc/       /tmp/ext_build/csrc/
+COPY setup_ext.py /tmp/ext_build/setup.py
+RUN cd /tmp/ext_build && \
+    pip install --no-build-isolation . && \
+    rm -rf /tmp/ext_build
+# ──────────────────────────────────────────────────────────────────────────────
 
 WORKDIR /home/${USER}/km-vipe
 CMD ["/bin/bash"]
