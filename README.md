@@ -86,6 +86,23 @@ scripts/slam_evaluation_replica.sh
 
 These scripts run the SLAM pipeline on the corresponding dataset and compute RMSE metrics for the generated trajectories.
 
+## Grounding
+
+The visualizer supports **open-vocabulary text-based grounding**: given a text prompt (e.g. `"chair"`, `"car"`), it highlights matching object instances in the map, clustered into per-instance oriented bounding boxes with DBSCAN.
+
+Minimal example:
+
+```bash
+python -m scripts.grounding /path/to/map.pt \
+  --pca-basis /path/to/pca.pt \
+  --ground "chair" \
+  --show-object-points
+```
+
+Key flags: `--ground` (the text prompt), `--threshold` (similarity cutoff, adaptive — lower it if nothing matches), `--cluster-eps` (DBSCAN neighborhood, **the main thing to tune per scene**), `--no-bbox` (skip boxes when multiple instances merge into one giant box).
+
+For the full pipeline description, parameter tuning by scene type, and troubleshooting, see **[scripts/grounding.md](scripts/grounding.md)**.
+
 ---
 
 ## Acknowledgments
