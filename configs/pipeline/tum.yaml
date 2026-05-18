@@ -43,4 +43,4 @@ output:
   # Visualization videos to BASE_PATH/vipe/xxx.mp4
   save_viz: false
   viz_downsample: 2
-  viz_attributes: [['rgb', 'instance'], ['depth', 'pcd']]
+  viz_attributes: [['rgb', 'embedding'], ['depth', 'pcd']]

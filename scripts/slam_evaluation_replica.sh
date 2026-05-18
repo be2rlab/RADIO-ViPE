@@ -5,7 +5,7 @@ export GT_FOLDER=/data/Replica
 export RESULTS_FOLDER=$ROOT_DIR/replica_results
 export CUDA_VISIBLE_DEVICES=1
 export SCENE_NAMES=(
-    room0
+    # room0
     room1
     room2 
     office0

@@ -69,11 +69,11 @@ ba:
 use_depth_prior_init: false
 
 embedding_covisibility:
-  enabled: false
+  enabled: true
   weight: 5.0
 
 loop_closure:
-  enabled: false
+  enabled: true
   similarity_thresh: 0.85
   min_interval: 20
   max_candidates: 3

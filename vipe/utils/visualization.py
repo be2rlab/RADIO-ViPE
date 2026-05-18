@@ -295,6 +295,7 @@ def save_projection_video(
     slam_output: SLAMOutput | None,
     subsample_factor: int,
     attributes: list[list[str]],
+    slam_config: dict | None = None,
 ):
     assert isinstance(video_stream, CachedVideoStream)
 
@@ -446,9 +447,77 @@ def save_projection_video(
             instance_img = cv2.resize(instance_img, (img_w, img_h))
             yield cv2.addWeighted(rgb_img, 0.5, instance_img, 0.5, 0)
 
+
+    def get_colored_emb_imgs():
+        from ..priors.embedding import EmbeddingsPipeline
+        embedder = EmbeddingsPipeline(
+            model_family=slam_config.model_family,
+            model_variant=slam_config.model_variant,
+            pca_dim=None,
+            radseg_lang_model=slam_config.radseg_lang_model,
+            radseg_lang_align=slam_config.radseg_lang_align,
+            radseg_slide_crop=slam_config.radseg_slide_crop,
+            radseg_slide_stride=slam_config.radseg_slide_stride,
+        )
+
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        # cache 
+        frame_stride = max(1, len(video_stream) // 50)
+        sample_stride = 4
+
+        cached_feats = {}     
+        collected = []
+
+        with torch.inference_mode():
+            for i, frame_data in enumerate(video_stream):
+                if i % frame_stride != 0:
+                    continue
+                feats, _ = embedder.embed_frame(frame_data)
+                cached_feats[i] = feats.to(torch.float16)
+                sub = feats[::sample_stride, ::sample_stride].reshape(-1, feats.shape[-1])
+                collected.append(sub.float())
+                del feats
+
+            all_feats = torch.cat(collected, dim=0)
+            del collected
+
+            feat_mean = all_feats.mean(dim=0, keepdim=True)
+            centered = all_feats - feat_mean
+            _, _, V = torch.svd_lowrank(centered, q=3, niter=2)
+            components = V
+
+            projected_all = centered @ components
+            pca_low = torch.quantile(projected_all, 0.02, dim=0)
+            pca_high = torch.quantile(projected_all, 0.98, dim=0)
+            pca_range = (pca_high - pca_low).clamp(min=1e-8)
+            del all_feats, centered, projected_all
+
+        # Second pass
+        with torch.inference_mode():
+            for i, (frame_data, rgb_img) in enumerate(zip(video_stream, get_rgb_imgs())):
+                if i in cached_feats:
+                    feats = cached_feats.pop(i).to(device, dtype=torch.float32)
+                else:
+                    feats, _ = embedder.embed_frame(frame_data)
+
+                Hp, Wp, C = feats.shape
+                flat = feats.reshape(-1, C).float()
+                projected = (flat - feat_mean) @ components
+                projected = ((projected - pca_low) / pca_range).clamp(0, 1)
+                pca_img = projected.reshape(Hp, Wp, 3)
+                pca_img = (pca_img * 255).to(torch.uint8).cpu().numpy()
+                pca_img = cv2.resize(pca_img, (img_w, img_h))
+                del feats, flat, projected
+                yield pca_img
+
+
+
+
     def get_empty_imgs():
         for _ in range(len(video_stream)):
             yield na_img
+
 
     img_iterators = [
         [
@@ -457,6 +526,7 @@ def save_projection_video(
                 "depth": get_depth_imgs(),
                 "pcd": get_pcd_imgs(),
                 "instance": get_instance_imgs(),
+                "embedding": get_colored_emb_imgs(),
                 "rectified": get_rectified_imgs(),
                 "empty": get_empty_imgs(),
             }[t]
