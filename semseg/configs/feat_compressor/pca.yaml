@@ -1,0 +1,3 @@
+_target_: semseg.feat_compressors.PcaCompressor
+out_dim: 256
+path: null

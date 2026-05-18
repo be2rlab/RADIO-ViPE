@@ -35,8 +35,7 @@ RUN apt-get update && apt-get install -y \
 
 RUN pip install ultralytics \
                 segment-anything-py \
-                open-clip-torch \
-                transformers==5.3.0
+                open-clip-torch 
 # RUN git clone https://github.com/facebookresearch/dinov3.git /home/${USER}/dinov3
 
 COPY ../envs/ envs/
@@ -50,6 +49,10 @@ RUN pip install scikit-learn
 RUN pip install ftfy regex tqdm
 RUN pip install transformers==4.52
 RUN pip install segment-anything-py
+
+RUN TORCH_VER=$(python3 -c "import torch; print(torch.__version__.split('+')[0])") && \
+    CUDA_VER=$(python3 -c "import torch; print('cu' + torch.version.cuda.replace('.', ''))") && \
+    pip install torch-scatter -f "https://data.pyg.org/whl/torch-${TORCH_VER}+${CUDA_VER}.html"
 
 WORKDIR /home/${USER}/km-vipe
 

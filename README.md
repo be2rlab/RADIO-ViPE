@@ -46,12 +46,62 @@ python run.py pipeline=default streams=raw_mp4_stream streams.base_path=YOUR_VID
 # Run the pose-only pipeline (without depth estimation)
 python run.py pipeline=default streams=raw_mp4_stream streams.base_path=YOUR_VIDEO_OR_DIR_PATH pipeline.post.depth_align_model=null
 ```
-
+##### For visualization, pass `--visualize` with the commands above.
 ---
 
 ## Evaluation
 
-Documentation and evaluation scripts are coming soon.
+### Semantic Segmentation evaluation
+
+Semantic segmentation evaluation uses code borrowed from the [RayFronts](https://github.com/RayFronts/RayFronts) repository.
+
+
+> For Replica, we use the NiceSlam version and we get the GT semantic labels from HOV-SG (Uploaded [here](https://cmu.app.box.com/s/x7si4h8y4sfk07dgmn9uwowaf2g74zjw) for convenience) since NiceSlam does not provide semantic labels without the original dataset.
+>
+> — *cited from [RayFronts](https://github.com/RayFronts/RayFronts)*.
+
+Run evaluation with one of the prepared configs:
+
+```bash
+python scripts/semseg_eval.py --config-name semseg_configs/replica_kmvipe
+```
+
+If you want to run evaluation for all the scenes:
+```bash
+python scripts/semseg_eval.py \
+  --config-name semseg_configs/replica_kmvipe \
+  --multirun \
+  semseg_configs.dataset.scene_name=office0,office1,office2,office3,office4,room0,room1,room2
+```
+
+Expected outputs are saved under `eval_out/<experiment>/<DatasetName>/<scene>/`.
+
+### RMSE evaluation
+
+RMSE evaluation is performed using the shell scripts provided in `scripts/`, for example:
+
+```bash
+scripts/slam_evaluation_replica.sh
+```
+
+These scripts run the SLAM pipeline on the corresponding dataset and compute RMSE metrics for the generated trajectories.
+
+## Grounding
+
+The visualizer supports **open-vocabulary text-based grounding**: given a text prompt (e.g. `"chair"`, `"car"`), it highlights matching object instances in the map, clustered into per-instance oriented bounding boxes with DBSCAN.
+
+Minimal example:
+
+```bash
+python -m scripts.grounding /path/to/map.pt \
+  --pca-basis /path/to/pca.pt \
+  --ground "chair" \
+  --show-object-points
+```
+
+Key flags: `--ground` (the text prompt), `--threshold` (similarity cutoff, adaptive — lower it if nothing matches), `--cluster-eps` (DBSCAN neighborhood, **the main thing to tune per scene**), `--no-bbox` (skip boxes when multiple instances merge into one giant box).
+
+For the full pipeline description, parameter tuning by scene type, and troubleshooting, see **[scripts/grounding.md](scripts/grounding.md)**.
 
 ---
 

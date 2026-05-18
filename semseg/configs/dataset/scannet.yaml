@@ -1,0 +1,7 @@
+_target_: semseg.datasets.ScanNetDataset
+path: ???
+scene_name: scene0518_00
+load_semseg: true
+rgb_resolution: [480, 640]
+depth_resolution: [480, 640]
+frame_skip: 10
