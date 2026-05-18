@@ -46,7 +46,7 @@ python run.py pipeline=default streams=raw_mp4_stream streams.base_path=YOUR_VID
 # Run the pose-only pipeline (without depth estimation)
 python run.py pipeline=default streams=raw_mp4_stream streams.base_path=YOUR_VIDEO_OR_DIR_PATH pipeline.post.depth_align_model=null
 ```
-
+##### For visualization, pass `--visualize` with the commands above.
 ---
 
 ## Evaluation
