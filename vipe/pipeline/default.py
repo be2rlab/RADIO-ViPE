@@ -171,6 +171,7 @@ class DefaultAnnotationPipeline(Pipeline):
                         slam_output,
                         self.out_cfg.viz_downsample,
                         self.out_cfg.viz_attributes,
+                        self.slam_cfg,
                     )
 
             if self.out_cfg.save_slam_map and slam_output.slam_map is not None:
