@@ -450,6 +450,8 @@ def save_projection_video(
 
     def get_colored_emb_imgs():
         from ..priors.embedding import EmbeddingsPipeline
+        from ..slam.system import StandardResizeStreamProcessor
+        from ..streams.base import ProcessedVideoStream
         embedder = EmbeddingsPipeline(
             model_family=slam_config.model_family,
             model_variant=slam_config.model_variant,
@@ -460,6 +462,7 @@ def save_projection_video(
             radseg_slide_stride=slam_config.radseg_slide_stride,
         )
 
+        embed_stream = ProcessedVideoStream(video_stream, [StandardResizeStreamProcessor()])
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         # cache 
@@ -468,9 +471,8 @@ def save_projection_video(
 
         cached_feats = {}     
         collected = []
-
         with torch.inference_mode():
-            for i, frame_data in enumerate(video_stream):
+            for i, frame_data in enumerate(embed_stream):
                 if i % frame_stride != 0:
                     continue
                 feats, _ = embedder.embed_frame(frame_data)
@@ -495,7 +497,7 @@ def save_projection_video(
 
         # Second pass
         with torch.inference_mode():
-            for i, (frame_data, rgb_img) in enumerate(zip(video_stream, get_rgb_imgs())):
+            for i, (frame_data, rgb_img) in enumerate(zip(embed_stream, get_rgb_imgs())):
                 if i in cached_feats:
                     feats = cached_feats.pop(i).to(device, dtype=torch.float32)
                 else:
