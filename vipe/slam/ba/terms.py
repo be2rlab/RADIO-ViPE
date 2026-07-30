@@ -139,9 +139,12 @@ class DenseDepthFlowTerm(SolverTerm):
         residual_scale: float = 1.0,
         use_photometric_residual: bool = False,
         debug_options: dict[str, Any] | None = None,
-        use_semantic_kernel: bool = False,
-        # --- Temporal stability kernel (Steps 1-4) ---
-        use_temporal_stability: bool = True,
+        # --- Robust kernel selection (paper Sec. III-D, Table V) ---
+        # "none" | "fixed" | "pairwise" | "temporal"
+        kernel_mode: str = "temporal",
+        fixed_alpha: float = 1.0,
+        stability_reduce: str = "min",
+        use_variance: bool = True,
         thresh_static: float = 0.75,
         thresh_movable: float = 0.35,
         alpha_static: float = 2.0,
@@ -158,8 +161,19 @@ class DenseDepthFlowTerm(SolverTerm):
         assert dense_disp_i_inds.shape == (self.n_terms,)
         assert dense_disp_j_inds.shape == (self.n_terms,)
 
-        self.use_semantic_kernel = use_semantic_kernel
-        self.use_temporal_stability = use_temporal_stability
+        if kernel_mode not in ("none", "fixed", "pairwise", "temporal"):
+            raise ValueError(
+                f"kernel_mode must be one of none|fixed|pairwise|temporal, got {kernel_mode!r}"
+            )
+        if stability_reduce not in ("min", "mean", "source"):
+            raise ValueError(
+                f"stability_reduce must be one of min|mean|source, got {stability_reduce!r}"
+            )
+        self.kernel_mode = kernel_mode
+        self.fixed_alpha = fixed_alpha
+        self.stability_reduce = stability_reduce
+        self.use_variance = use_variance
+        self._const_alpha_cache: torch.Tensor | None = None
         self.thresh_static = thresh_static
         self.thresh_movable = thresh_movable
         self.alpha_static = alpha_static
@@ -339,22 +353,34 @@ class DenseDepthFlowTerm(SolverTerm):
                     data=torch.cat([Jri, Jrj], dim=0),
                 )
 
-        if self.embeddings is not None and self.use_semantic_kernel:
-            if self.use_temporal_stability:
-                # compute temporal stability field and derive per-edge alpha
+        if self.kernel_mode == "none":
+            # Leaving alpha as None makes AdaptiveBarronRobustKernel fall back to
+            # alpha_init=2.0, i.e. exact L2 with unit weights.
+            self.alpha = None
+        elif self.kernel_mode == "fixed":
+            # Constant Barron shape: Huber (1), Cauchy (0), Geman-McClure (-2).
+            # Needs no embeddings.
+            self.alpha = torch.repeat_interleave(
+                self._constant_alpha(coords.device, coords.dtype), 2, dim=1
+            )
+        elif self.embeddings is not None:
+            if self.kernel_mode == "temporal":
                 if shared_cache is not None and shared_cache.all_cs is not None:
                     all_cs = shared_cache.all_cs
                 else:
                     all_cs = self._compute_all_cosine_sims(coords, valid, self.device)
                 self.alpha = self._compute_temporal_alpha(all_cs)
-            else:
-                # original pairwise sigmoid path (ablation fallback)
-                emedding_redisdual, embedding_residual_weights = self.compute_embedding_residuals(
+            else:  # "pairwise"
+                embedding_residual, embedding_residual_weights = self.compute_embedding_residuals(
                     coords, valid, self.device
                 )
-                emedding_redisdual = 1 - emedding_redisdual
-                self.calculate_alpha(emedding_redisdual, embedding_residual_weights)
+                embedding_residual = 1 - embedding_residual
+                self.calculate_alpha(embedding_residual, embedding_residual_weights)
             self.alpha = torch.repeat_interleave(self.alpha, 2, dim=1)
+        else:
+            # Embedding-driven mode requested but no embeddings staged (e.g. the
+            # sparse-tracks term). Fall back to L2 rather than crashing.
+            self.alpha = None
         return ConcreteTermEvalReturn(
             J=J_dict,
             w=weight,
@@ -527,9 +553,45 @@ class DenseDepthFlowTerm(SolverTerm):
                 S = cs_for_frame[0].clamp(0.0, 1.0)
             else:
                 mean_cs = cs_for_frame.mean(dim=0)
-                var_cs = cs_for_frame.var(dim=0, unbiased=False)
-                S = (mean_cs * (1.0 - var_cs)).clamp(0.0, 1.0)
+                if self.use_variance:
+                    var_cs = cs_for_frame.var(dim=0, unbiased=False)
+                    S = (mean_cs * (1.0 - var_cs)).clamp(0.0, 1.0)
+                else:
+                    # Ablation K8: mean agreement only, no temporal consistency.
+                    S = mean_cs.clamp(0.0, 1.0)
             self._stability_fields[fidx] = S
+
+    def _reduce_edge_stability(
+        self, S_i: torch.Tensor, S_j: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Combine the two endpoint stability fields of an edge into S_edge.
+
+        "min"    -- the less stable endpoint wins.  Prevents a moving object
+                    from receiving L2 treatment because it looks stable in
+                    one view.  This is the default and the reported setting.
+        "mean"   -- average the endpoints.
+        "source" -- ignore the target endpoint entirely (paper Eq. 7 as
+                    originally written).
+        """
+        if self.stability_reduce == "source":
+            return S_i
+        if self.stability_reduce == "mean":
+            return 0.5 * (S_i + S_j)
+        return torch.minimum(S_i, S_j)
+
+    def _constant_alpha(
+        self, device: torch.device, dtype: torch.dtype
+    ) -> torch.Tensor:
+        """Per-pixel alpha held constant at fixed_alpha (kernel_mode='fixed')."""
+        if self._const_alpha_cache is None:
+            self._const_alpha_cache = torch.full(
+                (self.n_terms, self.image_size[0] * self.image_size[1]),
+                self.fixed_alpha,
+                device=device,
+                dtype=dtype,
+            )
+        return self._const_alpha_cache
 
     # ------------------------------------------------------------------
     # STEP 2: three-regime differentiable alpha mapping
@@ -607,7 +669,7 @@ class DenseDepthFlowTerm(SolverTerm):
 
         S_i = S_table[self.dense_disp_i_inds]  # (n_terms, H*W)
         S_j = S_table[self.dense_disp_j_inds]  # (n_terms, H*W)
-        S_edge = torch.minimum(S_i, S_j)
+        S_edge = self._reduce_edge_stability(S_i, S_j)
 
         return self._stability_to_alpha(S_edge)
 

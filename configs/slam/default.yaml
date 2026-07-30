@@ -53,6 +53,23 @@ ba:
   embedding_weight: 0.001
   use_semantic_kernel: true
   # embedding_fine_iters: 4  # number of final BA iterations that include embedding term
+  kernel:
+    mode: temporal
+    fixed_alpha: 1.0
+    # How the two endpoints of an edge are combined into S_edge.
+    # min | mean | source
+    stability_reduce: min
+    # false -> S = mean(cs) only, dropping the (1 - variance) factor
+    use_variance: true
+    thresh_static: 0.75
+    thresh_movable: 0.35
+    alpha_static: 2.0
+    alpha_huber: 1.0
+    alpha_dynamic: -2.0
+  # Embedding residual form: cosine -> r = 1 - cs (default, matches reported results)
+  #                          photometric -> r = scale * sqrt(2(1-cs))
+  embedding_residual: cosine
+  embedding_residual_scale: 2.0
   embedding_debug:
     enabled: false
     log_every: 1

@@ -23,7 +23,7 @@ slam:
   radseg_slide_crop: 336
   radseg_slide_stride: 224
   radseg_lang_align: False
-  pca_dim: null
+  pca_dim: 256
   pca_state_path: "vipe_results/vipe/pca_basis.pt"
 
 # Post-processing configs

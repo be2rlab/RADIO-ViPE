@@ -33,6 +33,33 @@ from ..ba.kernel import AdaptiveBarronRobustKernel
 logger = logging.getLogger(__name__)
 
 
+def resolve_kernel_mode(ba_config) -> str:
+    """
+    Resolve the robust-kernel mode, honouring the deprecated boolean aliases.
+
+    An explicit ``ba.kernel.mode`` always wins.  When it is absent or null we
+    fall back to the historical pair of flags so that pre-existing configs and
+    the evaluation shell scripts keep working unchanged:
+
+        use_semantic_kernel=False                    -> "none"
+        use_semantic_kernel=True,  temporal=False    -> "pairwise"
+        use_semantic_kernel=True,  temporal=True     -> "temporal"
+    """
+    if ba_config is None:
+        return "none"
+
+    kernel_cfg = getattr(ba_config, "kernel", None)
+    mode = getattr(kernel_cfg, "mode", None) if kernel_cfg is not None else None
+    if mode not in (None, "null", ""):
+        return str(mode)
+
+    if not bool(getattr(ba_config, "use_semantic_kernel", False)):
+        return "none"
+    if bool(getattr(ba_config, "use_temporal_stability", True)):
+        return "temporal"
+    return "pairwise"
+
+
 class EmbeddingStore:
     """CPU-pinned embedding storage with on-demand GPU staging."""
 
@@ -524,15 +551,32 @@ class GraphBuffer:
             embedding_term_activation_iter = n_iters
             embedding_term = None
             embedding_weight = float(getattr(self.ba_config, "embedding_weight", 0.0))
-            use_semantic_kernel = bool(getattr(self.ba_config, "use_semantic_kernel", False))
-            use_temporal_stability = bool(getattr(self.ba_config, "use_temporal_stability", True))
-            thresh_static = float(getattr(self.ba_config, "thresh_static", 0.75))
-            thresh_movable = float(getattr(self.ba_config, "thresh_movable", 0.35))
-            alpha_static = float(getattr(self.ba_config, "alpha_static", 2.0))
-            alpha_huber = float(getattr(self.ba_config, "alpha_huber", 1.0))
-            alpha_dynamic = float(getattr(self.ba_config, "alpha_dynamic", -2.0))
+            kernel_mode = resolve_kernel_mode(self.ba_config)
+            kernel_cfg = getattr(self.ba_config, "kernel", None)
+
+            def _kernel_opt(name, default):
+                if kernel_cfg is None:
+                    return getattr(self.ba_config, name, default)
+                return getattr(kernel_cfg, name, getattr(self.ba_config, name, default))
+
+            fixed_alpha = float(_kernel_opt("fixed_alpha", 1.0))
+            stability_reduce = str(_kernel_opt("stability_reduce", "min"))
+            use_variance = bool(_kernel_opt("use_variance", True))
+            thresh_static = float(_kernel_opt("thresh_static", 0.75))
+            thresh_movable = float(_kernel_opt("thresh_movable", 0.35))
+            alpha_static = float(_kernel_opt("alpha_static", 2.0))
+            alpha_huber = float(_kernel_opt("alpha_huber", 1.0))
+            alpha_dynamic = float(_kernel_opt("alpha_dynamic", -2.0))
+
+            embedding_residual = str(getattr(self.ba_config, "embedding_residual", "cosine"))
+            use_photometric_residual = embedding_residual == "photometric"
+            residual_scale = (
+                float(getattr(self.ba_config, "embedding_residual_scale", 2.0))
+                if use_photometric_residual
+                else 1.0
+            )
             embedding_weight_map: torch.Tensor | None = None
-            if (staged_emb is not None or use_semantic_kernel):
+            if (staged_emb is not None or kernel_mode != "none"):
                 dense_h, dense_w = self.height // 8, self.width // 8
                 per_pixel_weight = rearrange(
                     weight.detach(), "nv (h w) c -> nv h w c", h=dense_h, w=dense_w, c=2,
@@ -557,6 +601,8 @@ class GraphBuffer:
                     rig=None,
                     image_size=(self.height // 8, self.width // 8),
                     camera_type=self.camera_type,
+                    use_photometric_residual=use_photometric_residual,
+                    residual_scale=residual_scale,
                     debug_options=self.embedding_debug_options,
                 )
                 solver.add_term(embedding_term)
@@ -586,13 +632,17 @@ class GraphBuffer:
                     rig=None,
                     image_size=(self.height // 8, self.width // 8),
                     camera_type=self.camera_type,
-                    use_semantic_kernel=use_semantic_kernel,
-                    use_temporal_stability=use_temporal_stability,
+                    kernel_mode=kernel_mode,
+                    fixed_alpha=fixed_alpha,
+                    stability_reduce=stability_reduce,
+                    use_variance=use_variance,
                     thresh_static=thresh_static,
                     thresh_movable=thresh_movable,
                     alpha_static=alpha_static,
                     alpha_huber=alpha_huber,
                     alpha_dynamic=alpha_dynamic,
+                    use_photometric_residual=use_photometric_residual,
+                    residual_scale=residual_scale,
                 ), AdaptiveBarronRobustKernel()
             )
 
