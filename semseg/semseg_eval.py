@@ -1,4 +1,4 @@
-"""Semantic segmentation evaluation for RADIO-ViPE pointcloud predictions."""
+"""Semantic segmentation evaluation for QUORUM pointcloud predictions."""
 
 from collections import OrderedDict
 import logging
