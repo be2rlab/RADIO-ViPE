@@ -1,0 +1,11 @@
+# Ablation preset -- keys are relative to pipeline.slam
+# Flattened to Hydra CLI overrides by scripts/ablation_presets.py
+ba:
+  embedding_weight: 0.0
+  kernel:
+    mode: none
+embedding_covisibility:
+  enabled: false
+loop_closure:
+  enabled: false
+use_semantic_flow_init: false
